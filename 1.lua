@@ -2305,28 +2305,25 @@ end
 -- ============================== NOTIFY ==============================
 -- Dirancang supaya praktis tanpa beban (aman di device kentang & Roblox split/multi-client):
 -- - Kartu dibuat SEKALI lalu dipakai ulang: tidak ada Instance.new/Destroy per notifikasi.
--- - Punya ScreenGui sendiri, jadi animasi notify tidak ikut me-render ulang Main Window.
--- - Tanpa Heartbeat/RenderStepped dan tanpa animasi loop. Timer = satu task.delay,
---   progress bar = satu tween native. Keduanya hanya dijadwalkan ulang saat ada event
---   (tampil, hover, antrian bertambah), tidak pernah dihitung per frame di Lua.
--- - Tween slide masuk/keluar dibuat sekali dan dipakai ulang.
+-- - Punya ScreenGui sendiri, jadi perubahan notify tidak ikut me-render ulang Main Window.
+-- - TANPA animasi/tween sama sekali: kartu cukup Visible = true/false.
+-- - Tanpa Heartbeat/RenderStepped. Timer = satu task.delay yang hanya dijadwalkan ulang
+--   saat ada event (tampil, hover, antrian bertambah), tidak pernah dihitung per frame.
 -- Perilaku: tampil BERGANTIAN (satu kartu, sisanya antri), timer dipercepat saat antrian
 -- berisi, notifikasi identik tidak diduplikasi, hover menjeda timer (PC), ✕ menutup kartu.
 local NOTIFY = {
-    WIDTH     = isMobile and 250 or 290,
+    WIDTH     = isMobile and 230 or 260,
     MARGIN    = 14,
     MAX_QUEUE = 10,
-    LOGO      = "rbxassetid://104332967321169",
     PAD       = 12,
-    BODY_X    = 46,
+    BODY_X    = 12,
     HEADER_Y  = 9,
     HEADER_H  = 16,
     GAP       = 0.1,   -- jeda antar kartu (detik)
     FAST_RATE = 1.6,   -- kecepatan timer saat antrian berisi
 }
 NOTIFY.BODY_W     = NOTIFY.WIDTH - NOTIFY.BODY_X - NOTIFY.PAD
-NOTIFY.SHOWN_POS  = UDim2.new(1, -NOTIFY.MARGIN, 1, -NOTIFY.MARGIN)
-NOTIFY.HIDDEN_POS = UDim2.new(1, NOTIFY.WIDTH + 30, 1, -NOTIFY.MARGIN)
+NOTIFY.POS        = UDim2.new(1, -NOTIFY.MARGIN, 1, -NOTIFY.MARGIN)
 local function measureTextHeight(text, size, font, width)
     if text == "" then return 0 end
     return math.ceil(TextService:GetTextSize(text, size, font, Vector2.new(width, 10000)).Y)
@@ -2348,7 +2345,7 @@ function Library:MakeNotify(config)
     self._notifQueue = self._notifQueue or {}
     local queue = self._notifQueue
     local current = self._notifCurrent
-    if current and not current.closing and current.key == item.key then
+    if current and current.key == item.key then
         -- notifikasi identik sedang tampil: cukup ulang timernya
         current.remaining = current.total
         current.tick = os.clock()
@@ -2372,10 +2369,8 @@ function Library:_resetNotify()
     if self._notifQueue then table.clear(self._notifQueue) end
     local state, ui = self._notifCurrent, self._notifUI
     self._notifCurrent, self._notifUI = nil, nil
-    if state then
-        state.closing = true
-        if state.timer then pcall(task.cancel, state.timer) end
-        if state.barTween then pcall(function() state.barTween:Cancel() end) end
+    if state and state.timer then
+        pcall(task.cancel, state.timer)
     end
     if ui and ui.gui.Parent then
         pcall(function() ui.gui:Destroy() end)
@@ -2404,7 +2399,7 @@ function Library:_getNotifyUI()
         Name = "Card",
         AnchorPoint = Vector2.new(1, 1),
         Size = UDim2.new(0, W, 0, 60),
-        Position = NOTIFY.HIDDEN_POS,
+        Position = NOTIFY.POS,
         BackgroundColor3 = colors.bg1,
         BackgroundTransparency = panelTransparency,
         BorderSizePixel = 0,
@@ -2415,7 +2410,7 @@ function Library:_getNotifyUI()
     ui.card = card
     new("UICorner", {Parent = card, CornerRadius = UDim.new(0, 7)})
     ui.stroke = new("UIStroke", {Parent = card, Color = colors.border, Thickness = 1, Transparency = 0.35})
-    -- rona warna aksen dari sisi kiri, di belakang badge
+    -- rona tipis warna aksen dari sisi kiri
     ui.glow = new("Frame", {
         Parent = card,
         Size = UDim2.new(1, 0, 1, 0),
@@ -2431,43 +2426,6 @@ function Library:_getNotifyUI()
             NumberSequenceKeypoint.new(0.3, 0.94),
             NumberSequenceKeypoint.new(1, 1)
         })
-    })
-    -- badge diamond (statis): cincin luar + diamond isi + logo.
-    -- Dibuat sebagai sibling (bukan child) supaya logo tidak ikut terotasi.
-    local badgeX = 23
-    local ring = new("Frame", {
-        Parent = card,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.new(0, badgeX, 0.5, 0),
-        Size = UDim2.new(0, 26, 0, 26),
-        Rotation = 45,
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ZIndex = 3
-    })
-    new("UICorner", {Parent = ring, CornerRadius = UDim.new(0, 6)})
-    ui.ringStroke = new("UIStroke", {Parent = ring, Color = colors.primary, Thickness = 1, Transparency = 0.65})
-    local diamond = new("Frame", {
-        Parent = card,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.new(0, badgeX, 0.5, 0),
-        Size = UDim2.new(0, 18, 0, 18),
-        Rotation = 45,
-        BackgroundColor3 = colors.bg3,
-        BorderSizePixel = 0,
-        ZIndex = 4
-    })
-    new("UICorner", {Parent = diamond, CornerRadius = UDim.new(0, 4)})
-    ui.diamondStroke = new("UIStroke", {Parent = diamond, Color = colors.primary, Thickness = 1.5, Transparency = 0.1})
-    ui.logo = new("ImageLabel", {
-        Parent = card,
-        Image = NOTIFY.LOGO,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.new(0, badgeX, 0.5, 0),
-        Size = UDim2.new(0, 11, 0, 11),
-        BackgroundTransparency = 1,
-        ImageColor3 = colors.primary,
-        ZIndex = 5
     })
     -- header ala Main Window: Judul │ Brand ............ +N  ✕
     ui.title = new("TextLabel", {
@@ -2560,7 +2518,7 @@ function Library:_getNotifyUI()
             line.BackgroundColor3 = c
         end
     end
-    local divider = new("Frame", {
+    ui.divider = new("Frame", {
         Parent = card,
         Size = UDim2.new(0, BODY_W, 0, 1),
         Position = UDim2.new(0, BODY_X, 0, HY + HH + 3),
@@ -2570,7 +2528,7 @@ function Library:_getNotifyUI()
         ZIndex = 5
     })
     new("UIGradient", {
-        Parent = divider,
+        Parent = ui.divider,
         Transparency = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 0),
             NumberSequenceKeypoint.new(1, 1)
@@ -2606,40 +2564,6 @@ function Library:_getNotifyUI()
         Visible = false,
         ZIndex = 5
     })
-    -- progress bar sisa waktu tampil
-    ui.track = new("Frame", {
-        Parent = card,
-        Size = UDim2.new(0, BODY_W, 0, 2),
-        Position = UDim2.new(0, BODY_X, 0, 40),
-        BackgroundColor3 = colors.bg4,
-        BackgroundTransparency = 0.25,
-        BorderSizePixel = 0,
-        ZIndex = 5
-    })
-    new("UICorner", {Parent = ui.track, CornerRadius = UDim.new(1, 0)})
-    ui.fill = new("Frame", {
-        Parent = ui.track,
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundColor3 = colors.primary,
-        BorderSizePixel = 0,
-        ZIndex = 6
-    })
-    new("UICorner", {Parent = ui.fill, CornerRadius = UDim.new(1, 0)})
-    ui.showTween = TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = NOTIFY.SHOWN_POS})
-    ui.hideTween = TweenService:Create(card, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Position = NOTIFY.HIDDEN_POS})
-    ui.hideTween.Completed:Connect(function(playbackState)
-        if playbackState ~= Enum.PlaybackState.Completed then return end
-        card.Visible = false
-        local state = self._notifCurrent
-        if not state or not state.closing then return end
-        self._notifCurrent = nil
-        local gen = self._notifGen or 0
-        task.delay(NOTIFY.GAP, function()
-            if (self._notifGen or 0) == gen then
-                self:_showNextNotify()
-            end
-        end)
-    end)
     card.MouseEnter:Connect(function()
         -- di perangkat sentuh MouseLeave tidak selalu terpicu, jadi jeda hanya untuk PC
         if isMobile then return end
@@ -2702,16 +2626,11 @@ function Library:_showNextNotify()
         ui.content.Position = UDim2.new(0, BODY_X, 0, y)
         y = y + contentH + 3
     end
-    local barY = y + 5
-    ui.track.Position = UDim2.new(0, BODY_X, 0, barY)
-    ui.card.Size = UDim2.new(0, NOTIFY.WIDTH, 0, barY + 12)
+    local hasBody = descH > 0 or contentH > 0
+    ui.divider.Visible = hasBody
+    ui.card.Size = UDim2.new(0, NOTIFY.WIDTH, 0, hasBody and (y + 7) or (HY + HH + HY))
     ui.accent = color
     ui.glow.BackgroundColor3 = color
-    ui.ringStroke.Color = color
-    ui.diamondStroke.Color = color
-    ui.logo.ImageColor3 = color
-    ui.fill.BackgroundColor3 = color
-    ui.fill.Size = UDim2.new(1, 0, 1, 0)
     ui.queuePill.Visible = false
     ui.hovered = false
     ui.stroke.Color = colors.border
@@ -2724,31 +2643,23 @@ function Library:_showNextNotify()
         remaining = item.delay,
         rate      = 0,
         tick      = os.clock(),
-        closing   = false,
         timer     = nil,
-        barTween  = nil,
     }
-    ui.card.Position = NOTIFY.HIDDEN_POS
     ui.card.Visible = true
-    ui.showTween:Play()
     self:_scheduleNotify()
 end
--- Sinkronkan sisa waktu, lalu jadwalkan ulang timer + tween progress bar.
+-- Sinkronkan sisa waktu, lalu jadwalkan ulang satu timer.
 -- Hanya dipanggil saat ada event (tampil, hover, antrian berubah), bukan per frame.
 function Library:_scheduleNotify()
     local state = self._notifCurrent
     local ui = self._notifUI
-    if not state or state.closing or not ui then return end
+    if not state or not ui then return end
     local now = os.clock()
     state.remaining = state.remaining - (now - state.tick) * state.rate
     state.tick = now
     if state.timer then
         pcall(task.cancel, state.timer)
         state.timer = nil
-    end
-    if state.barTween then
-        state.barTween:Cancel()
-        state.barTween = nil
     end
     local pending = self._notifQueue and #self._notifQueue or 0
     ui.queuePill.Text = "+" .. pending
@@ -2757,13 +2668,9 @@ function Library:_scheduleNotify()
         self:_hideNotify()
         return
     end
-    ui.fill.Size = UDim2.new(math.clamp(state.remaining / state.total, 0, 1), 0, 1, 0)
     state.rate = ui.hovered and 0 or (pending > 0 and NOTIFY.FAST_RATE or 1)
     if state.rate == 0 then return end
-    local wallTime = state.remaining / state.rate
-    state.barTween = TweenService:Create(ui.fill, TweenInfo.new(wallTime, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 1, 0)})
-    state.barTween:Play()
-    state.timer = task.delay(wallTime, function()
+    state.timer = task.delay(state.remaining / state.rate, function()
         state.timer = nil
         if self._notifCurrent == state then
             self:_hideNotify()
@@ -2772,22 +2679,23 @@ function Library:_scheduleNotify()
 end
 function Library:_hideNotify()
     local state = self._notifCurrent
-    if not state or state.closing then return end
-    state.closing = true
+    if not state then return end
+    self._notifCurrent = nil
     if state.timer then
         pcall(task.cancel, state.timer)
         state.timer = nil
     end
-    if state.barTween then
-        state.barTween:Cancel()
-        state.barTween = nil
-    end
     local ui = self._notifUI
     if ui and ui.gui.Parent then
-        ui.hideTween:Play()
-    else
-        self._notifCurrent = nil
+        ui.card.Visible = false
     end
+    -- jeda singkat supaya pergantian ke kartu berikutnya tetap terlihat
+    local gen = self._notifGen or 0
+    task.delay(NOTIFY.GAP, function()
+        if (self._notifGen or 0) == gen then
+            self:_showNextNotify()
+        end
+    end)
 end
 function Library:_createConfigTab(WindowObject)
     local configTab = WindowObject:AddTab({ Name = "Config", Icon = "loop" })
