@@ -29,6 +29,7 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService      = game:GetService("HttpService")
 local TextService      = game:GetService("TextService")
+local GuiService       = game:GetService("GuiService")
 
 local u2, v2, rgb = UDim2.new, Vector2.new, Color3.fromRGB
 
@@ -124,11 +125,6 @@ end
 local function isPress(input)
     local t = input.UserInputType
     return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
-end
-
-local function isMove(input)
-    local t = input.UserInputType
-    return t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch
 end
 
 -- Efek hover hanya untuk mouse. Di layar sentuh MouseLeave sering tidak terpicu sehingga
@@ -436,36 +432,45 @@ local function pixelPosition(guiObject, screen)
     return v2(p.X.Scale * screen.X + p.X.Offset, p.Y.Scale * screen.Y + p.Y.Offset)
 end
 
+local DRAG_END = { [Enum.UserInputState.End] = true, [Enum.UserInputState.Cancel] = true }
+
+-- Drag berakhir saat: input berstatus End/Cancel atau InputEnded datang, menu Esc Roblox dibuka,
+-- atau window Roblox kehilangan fokus (alt-tab). Sengaja TIDAK memakai IsMouseButtonPressed karena
+-- statusnya bisa salah setelah menu Esc. Drag lama yang tidak sempat selesai tidak mengunci drag baru.
 local function trackDrag(handle, onStart, onMove, onEnd)
-    local dragging = false
+    local finishActive
     handle.InputBegan:Connect(function(input)
-        if dragging or not isPress(input) then return end
-        dragging = true
-        local startPos, moved = input.Position, false
-        local moveConn, endConn
+        if not isPress(input) then return end
+        if finishActive then finishActive(true) end
+        local startPos, moved, conns = input.Position, false, {}
         local function finish(cancelled)
-            if not dragging then return end
-            dragging = false
-            moveConn:Disconnect()
-            endConn:Disconnect()
+            if finishActive ~= finish then return end
+            finishActive = nil
+            for _, conn in ipairs(conns) do conn:Disconnect() end
             if onEnd then onEnd(moved or cancelled) end
         end
+        local function cancel() finish(true) end
+        finishActive = finish
         if onStart then onStart() end
-        moveConn = UserInputService.InputChanged:Connect(function(i)
-            if not isMove(i) then return end
-            -- Tombol mouse dilepas saat game tidak fokus (alt-tab): InputEnded tidak pernah datang,
-            -- jadi drag diakhiri di sini supaya window tidak terus mengikuti mouse.
-            if i.UserInputType == Enum.UserInputType.MouseMovement
-                and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-                return finish(true)
-            end
-            local delta = i.Position - startPos
-            if delta.Magnitude > DRAG_THRESHOLD then moved = true end
-            onMove(delta)
-        end)
-        endConn = UserInputService.InputEnded:Connect(function(i)
-            if isPress(i) then finish(false) end
-        end)
+        conns = {
+            UserInputService.InputChanged:Connect(function(i)
+                -- mouse: gerakan apa pun; layar sentuh: hanya jari yang memulai drag
+                if i ~= input and i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+                local delta = i.Position - startPos
+                if delta.Magnitude > DRAG_THRESHOLD then moved = true end
+                onMove(delta)
+            end),
+            input.Changed:Connect(function()
+                if DRAG_END[input.UserInputState] then finish(false) end
+            end),
+            UserInputService.InputEnded:Connect(function(i)
+                if i == input or (i.UserInputType == input.UserInputType and i.UserInputType ~= Enum.UserInputType.Touch) then
+                    finish(false)
+                end
+            end),
+            GuiService.MenuOpened:Connect(cancel),
+            UserInputService.WindowFocusReleased:Connect(cancel),
+        }
     end)
 end
 
