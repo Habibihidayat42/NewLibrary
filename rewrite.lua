@@ -132,6 +132,33 @@ local function isMove(input)
     return t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch
 end
 
+-- Efek hover hanya untuk mouse. Di layar sentuh MouseLeave sering tidak terpicu sehingga
+-- warnanya "nyangkut"; sekalian mengurangi jumlah koneksi di HP.
+local function onHover(guiObject, enter, leave)
+    if isMobile then return end
+    guiObject.MouseEnter:Connect(enter)
+    guiObject.MouseLeave:Connect(leave)
+end
+
+-- Tempat ScreenGui: gethui() -> CoreGui -> PlayerGui, supaya tetap tampil di executor
+-- yang memblokir akses ke CoreGui.
+local function getGuiParent()
+    local ok, hidden = pcall(function() return gethui and gethui() end)
+    if ok and typeof(hidden) == "Instance" then return hidden end
+    local probe = Instance.new("ScreenGui")
+    local canUseCore = pcall(function() probe.Parent = CoreGui end)
+    probe:Destroy()
+    if canUseCore then return CoreGui end
+    return localPlayer:WaitForChild("PlayerGui")
+end
+
+-- Ukuran layar untuk menyesuaikan window di HP / Roblox split-screen.
+local function getScreenSize(gui)
+    local size = gui.AbsoluteSize
+    if size.X < 100 and workspace.CurrentCamera then size = workspace.CurrentCamera.ViewportSize end
+    return size.X < 100 and v2(1920, 1080) or size
+end
+
 local function toKey(title)
     return (tostring(title):gsub("%s+", "_"))
 end
@@ -299,9 +326,21 @@ local function markDirty()
     end)
 end
 
--- Simpan nilai ke config lalu jadwalkan autosave.
+-- Nilai yang disimpan komponen hanya boolean/number/string atau list, jadi cukup
+-- dibandingkan per elemen.
+local function sameValue(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    if #a ~= #b then return false end
+    for i = 1, #a do
+        if a[i] ~= b[i] then return false end
+    end
+    return true
+end
+
+-- Simpan nilai ke config lalu jadwalkan autosave. Nilai yang tidak berubah dilewati,
+-- jadi SetOptions/SetValue yang dipanggil berkala tidak menulis file terus-menerus.
 local function saveValue(path, value)
-    if not path then return end
+    if not path or sameValue(Config.Get(path), value) then return end
     Config.Set(path, value)
     markDirty()
 end
@@ -396,11 +435,12 @@ function Library:CreateWindow(config)
     config = config or {}
     local name = config.Name or "LynxGUI"
     self:Cleanup()
-    local existing = CoreGui:FindFirstChild(name)
+    self._guiParent = self._guiParent or getGuiParent()
+    local existing = self._guiParent:FindFirstChild(name)
     if existing then existing:Destroy() end
 
     local gui = new("ScreenGui", {
-        Name = name, Parent = CoreGui, IgnoreGuiInset = true, ResetOnSpawn = false,
+        Name = name, Parent = self._guiParent, IgnoreGuiInset = true, ResetOnSpawn = false,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 2147483647,
     })
     self._gui = gui
@@ -408,10 +448,14 @@ function Library:CreateWindow(config)
         if self._gui == gui then self:Cleanup() end
     end)
 
+    -- window & batas resize tidak boleh melebihi layar (HP kecil / split-screen)
+    local screen = getScreenSize(gui)
+    local minSize = v2(math.min(MIN_SIZE.X, screen.X - 20), math.min(MIN_SIZE.Y, screen.Y - 20))
+    local startW = math.min(WINDOW_SIZE.X, screen.X - 20)
+    local startH = math.min(WINDOW_SIZE.Y, screen.Y - 20)
     local win = new("Frame", {
         Parent = gui, ZIndex = 3,
-        Size = u2(0, WINDOW_SIZE.X, 0, WINDOW_SIZE.Y),
-        Position = u2(0.5, -WINDOW_SIZE.X / 2, 0.5, -WINDOW_SIZE.Y / 2),
+        Size = u2(0, startW, 0, startH), Position = u2(0.5, -startW / 2, 0.5, -startH / 2),
         BackgroundColor3 = colors.bg1, BackgroundTransparency = PANEL_T,
     }, { corner(7) })
     self._win = win
@@ -473,8 +517,7 @@ function Library:CreateWindow(config)
         minStroke.Transparency = on and 0.1 or 0.4
         minLine.Size = u2(0, on and 12 or 10, 0, 2)
     end
-    minBtn.MouseEnter:Connect(function() setMinHover(true) end)
-    minBtn.MouseLeave:Connect(function() setMinHover(false) end)
+    onHover(minBtn, function() setMinHover(true) end, function() setMinHover(false) end)
 
     -- tombol discord (salin link invite)
     local discordLink, discordText = "https://discord.gg/lynxx", "discord.gg/lynxx"
@@ -495,8 +538,9 @@ function Library:CreateWindow(config)
         Parent = discordBtn, ZIndex = 8, Text = discordText, TextColor3 = colors.primary,
         TextTruncate = Enum.TextTruncate.AtEnd, Size = u2(0, discordTextW + 2, 1, 0), Position = u2(0, 33, 0, 0),
     })
-    discordBtn.MouseEnter:Connect(function() discordLabel.TextColor3 = colors.text end)
-    discordBtn.MouseLeave:Connect(function() discordLabel.TextColor3 = colors.primary end)
+    onHover(discordBtn,
+        function() discordLabel.TextColor3 = colors.text end,
+        function() discordLabel.TextColor3 = colors.primary end)
     discordBtn.MouseButton1Click:Connect(function()
         local clip = setclipboard or toclipboard or writeclipboard
             or (Clipboard and Clipboard.set) or (clipboard and clipboard.set)
@@ -549,8 +593,8 @@ function Library:CreateWindow(config)
     local sizeStart
     trackDrag(resizeHandle, function() sizeStart = win.AbsoluteSize end, function(delta)
         win.Size = u2(
-            0, math.clamp(sizeStart.X + delta.X, MIN_SIZE.X, MAX_SIZE.X),
-            0, math.clamp(sizeStart.Y + delta.Y, MIN_SIZE.Y, MAX_SIZE.Y)
+            0, math.clamp(sizeStart.X + delta.X, minSize.X, MAX_SIZE.X),
+            0, math.clamp(sizeStart.Y + delta.Y, minSize.Y, MAX_SIZE.Y)
         )
     end)
 
@@ -672,8 +716,9 @@ function Library:_createSearchBar()
             Parent = button, ZIndex = 63, Font = MEDIUM, TextSize = 9, TextColor3 = colors.textDimmer,
             TextTruncate = Enum.TextTruncate.AtEnd, Size = u2(1, -14, 0, 11), Position = u2(0, 9, 0, 18),
         })
-        button.MouseEnter:Connect(function() button.BackgroundColor3 = colors.bg4 end)
-        button.MouseLeave:Connect(function() button.BackgroundColor3 = colors.bg3 end)
+        onHover(button,
+            function() button.BackgroundColor3 = colors.bg4 end,
+            function() button.BackgroundColor3 = colors.bg3 end)
         button.MouseButton1Click:Connect(function()
             if row.entry then goToFeature(row.entry) end
         end)
@@ -727,8 +772,9 @@ function Library:_createSearchBar()
         searchStroke.Color, searchStroke.Transparency = colors.border, 0.4
     end)
     clearBtn.MouseButton1Click:Connect(function() searchBox.Text = "" end)
-    clearBtn.MouseEnter:Connect(function() clearBtn.TextColor3 = colors.primary end)
-    clearBtn.MouseLeave:Connect(function() clearBtn.TextColor3 = colors.textDimmer end)
+    onHover(clearBtn,
+        function() clearBtn.TextColor3 = colors.primary end,
+        function() clearBtn.TextColor3 = colors.textDimmer end)
 end
 
 -- ================================ PAGES ================================
@@ -1076,11 +1122,9 @@ function Library:_createBaseDropdown(parent, title, _imageId, items, configPath,
             }, { corner(3) }),
         }
         local button = new("TextButton", { Parent = rowFrame, ZIndex = 157, Size = u2(1, 0, 1, 0) })
-        rowFrame.MouseEnter:Connect(function()
-            if not row.index then return end
-            rowFrame.BackgroundColor3 = colors.bg4
-        end)
-        rowFrame.MouseLeave:Connect(function()
+        onHover(rowFrame, function()
+            if row.index then rowFrame.BackgroundColor3 = colors.bg4 end
+        end, function()
             if row.opt then paintRow(row, row.opt, true) end
         end)
         button.Activated:Connect(function() onRowClick(row) end)
@@ -1456,13 +1500,13 @@ function Library:_getNotifyUI()
     if ui and ui.gui.Parent then return ui end
     if not self._gui then return nil end
     local guiName = self._gui.Name .. "_Notify"
-    local stale = CoreGui:FindFirstChild(guiName)
+    local stale = self._guiParent:FindFirstChild(guiName)
     if stale then stale:Destroy() end
 
     local midY = NOTIFY.PAD_Y + NOTIFY.TITLE_H / 2
     ui = { hovered = false }
     ui.gui = new("ScreenGui", {
-        Name = guiName, Parent = CoreGui, IgnoreGuiInset = true, ResetOnSpawn = false,
+        Name = guiName, Parent = self._guiParent, IgnoreGuiInset = true, ResetOnSpawn = false,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 2147483647,
     })
     -- latar & transparansi sama persis dengan Main Window
@@ -1497,20 +1541,19 @@ function Library:_getNotifyUI()
         AnchorPoint = v2(1, 0.5), Size = u2(0, 18, 0, 18), Position = u2(1, -6, 0, midY),
     })
 
-    ui.card.MouseEnter:Connect(function()
-        -- di perangkat sentuh MouseLeave tidak selalu terpicu, jadi jeda hanya untuk PC
-        if isMobile then return end
+    -- hover menjeda timer (hanya mouse, lihat onHover)
+    onHover(ui.card, function()
         ui.hovered = true
         self:_scheduleNotify()
-    end)
-    ui.card.MouseLeave:Connect(function()
+    end, function()
         if not ui.hovered then return end
         ui.hovered = false
         self:_scheduleNotify()
     end)
     ui.closeBtn.MouseButton1Click:Connect(function() self:_hideNotify() end)
-    ui.closeBtn.MouseEnter:Connect(function() ui.closeBtn.TextColor3 = colors.text end)
-    ui.closeBtn.MouseLeave:Connect(function() ui.closeBtn.TextColor3 = colors.textDimmer end)
+    onHover(ui.closeBtn,
+        function() ui.closeBtn.TextColor3 = colors.text end,
+        function() ui.closeBtn.TextColor3 = colors.textDimmer end)
     ui.gui.Destroying:Connect(function()
         if self._notifUI == ui then self:_resetNotify() end
     end)
