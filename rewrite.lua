@@ -29,7 +29,6 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService      = game:GetService("HttpService")
 local TextService      = game:GetService("TextService")
-local localPlayer      = Players.LocalPlayer
 
 local u2, v2, rgb = UDim2.new, Vector2.new, Color3.fromRGB
 
@@ -149,7 +148,8 @@ local function getGuiParent()
     local canUseCore = pcall(function() probe.Parent = CoreGui end)
     probe:Destroy()
     if canUseCore then return CoreGui end
-    return localPlayer:WaitForChild("PlayerGui")
+    while not Players.LocalPlayer do task.wait() end   -- autoexec bisa jalan sebelum player siap
+    return Players.LocalPlayer:WaitForChild("PlayerGui")
 end
 
 -- Ukuran layar untuk menyesuaikan window di HP / Roblox split-screen.
@@ -159,8 +159,9 @@ local function getScreenSize(gui)
     return size.X < 100 and v2(1920, 1080) or size
 end
 
+-- Titik juga diganti "_" karena titik adalah pemisah path config ("Speed 1.5x" -> "Speed_1_5x").
 local function toKey(title)
-    return (tostring(title):gsub("%s+", "_"))
+    return (tostring(title):gsub("[%s%.]+", "_"))
 end
 
 local function textHeight(text, size, font, width)
@@ -239,33 +240,36 @@ local CONFIG_FILE   = CONFIG_FOLDER .. "/lynx_config.json"
 local Config        = Library.ConfigSystem
 local CurrentConfig, DefaultConfig = {}, {}
 local CallbackRegistry = {}
-local isDirty, saveThread = false, nil
+local isDirty, saveThread, lastSaveError = false, nil, nil
 
 function Config.SetDefaults(defaults)
     DefaultConfig = deepCopy(defaults or {})
 end
 
--- Semua akses file dibungkus pcall: executor tanpa writefile/readfile tidak membuat error.
+-- Semua akses file dibungkus pcall: executor tanpa fungsi file tidak membuat error.
+-- isfolder/makefolder opsional karena sebagian executor tidak punya, tapi writefile tetap bisa.
 function Config.Save()
-    return (pcall(function()
-        if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+    return pcall(function()
+        if isfolder and makefolder and not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
         writefile(CONFIG_FILE, HttpService:JSONEncode(CurrentConfig))
-    end))
+    end)
 end
 
 function Config.Load()
     CurrentConfig = deepCopy(DefaultConfig)
-    local hasFile = false
+    local exists = false
     local ok, loaded = pcall(function()
-        hasFile = isfile(CONFIG_FILE)
-        if not hasFile then return nil end
+        exists = isfile(CONFIG_FILE)
+        if not exists then return nil end
         local raw = readfile(CONFIG_FILE)
-        return (raw and raw ~= "") and HttpService:JSONDecode(raw) or nil
+        return raw ~= "" and HttpService:JSONDecode(raw) or nil
     end)
     if ok and type(loaded) == "table" then
         mergeTables(CurrentConfig, loaded)
-    elseif not ok and hasFile then
-        pcall(delfile, CONFIG_FILE)   -- file rusak / JSON tidak valid
+    elseif exists then
+        -- File ada tapi tidak terbaca (rusak / sedang ditulis client Roblox lain): JANGAN dihapus,
+        -- cukup pakai default sementara. Dulu file langsung dihapus sehingga semua setting hilang.
+        warn("[LynxGUI] File config tidak bisa dibaca, sementara memakai nilai default.")
     end
     return CurrentConfig
 end
@@ -322,7 +326,11 @@ local function markDirty()
         if not isDirty then return end
         -- tandai bersih SEBELUM Save: perubahan yang masuk selama Save akan dijadwalkan ulang
         isDirty = false
-        Config.Save()
+        local ok, err = Config.Save()
+        if not ok and err ~= lastSaveError then
+            warn("[LynxGUI] Config gagal disimpan: " .. tostring(err))
+        end
+        lastSaveError = not ok and err or nil
     end)
 end
 
@@ -351,6 +359,12 @@ local function registerCallback(path, callback, kind, default, updateVisual)
         warn(("[LynxGUI] Judul komponen duplikat -> config '%s' dipakai lebih dari sekali; nilainya akan saling menimpa. Pakai judul yang unik."):format(path))
     end
     CallbackRegistry[path] = { path = path, callback = callback, kind = kind, default = default, updateVisual = updateVisual }
+    -- Komponen yang dibuat SETELAH Init langsung dipulihkan juga; tanpa ini visual ON tapi fitur OFF.
+    if Library._initialized then
+        local value = Config.Get(path, default)
+        if updateVisual then safeCall("updateVisual @" .. path, updateVisual, value) end
+        fireCallback("callback @" .. path, callback, value)
+    end
 end
 
 -- Visual dulu, lalu callback non-toggle (dropdown/input), terakhir toggle: fitur yang
@@ -372,7 +386,13 @@ end
 
 _G.AutoSaveEnabled = true
 function _G.GetConfigValue(key, default) return Config.Get(key, default) end
+local SAVEABLE = { ["nil"] = true, boolean = true, number = true, string = true, table = true }
 function _G.SaveConfigValue(key, value)
+    -- Vector3/CFrame/Instance diam-diam tersimpan sebagai null oleh JSONEncode, jadi ditolak di sini.
+    if not SAVEABLE[type(value)] then
+        warn(("[LynxGUI] SaveConfigValue('%s'): tipe %s tidak bisa disimpan; ubah ke angka/string/tabel dulu."):format(tostring(key), typeof(value)))
+        return
+    end
     Config.Set(key, value)
     markDirty()
 end
@@ -407,6 +427,8 @@ end
 -- =============================== WINDOW ===============================
 -- Lacak drag pada `handle`. onMove(delta) dipanggil selama digeser, onEnd(moved) saat
 -- dilepas. Koneksi UserInputService HANYA hidup selama drag berlangsung (tanpa beban idle).
+local DRAG_THRESHOLD = isMobile and 12 or 6   -- geser di bawah ini tetap dihitung "tap"
+
 local function trackDrag(handle, onStart, onMove, onEnd)
     local dragging = false
     handle.InputBegan:Connect(function(input)
@@ -414,19 +436,28 @@ local function trackDrag(handle, onStart, onMove, onEnd)
         dragging = true
         local startPos, moved = input.Position, false
         local moveConn, endConn
-        if onStart then onStart() end
-        moveConn = UserInputService.InputChanged:Connect(function(i)
-            if not isMove(i) then return end
-            local delta = i.Position - startPos
-            if delta.Magnitude > 6 then moved = true end
-            onMove(delta)
-        end)
-        endConn = UserInputService.InputEnded:Connect(function(i)
-            if not isPress(i) then return end
+        local function finish(cancelled)
+            if not dragging then return end
             dragging = false
             moveConn:Disconnect()
             endConn:Disconnect()
-            if onEnd then onEnd(moved) end
+            if onEnd then onEnd(moved or cancelled) end
+        end
+        if onStart then onStart() end
+        moveConn = UserInputService.InputChanged:Connect(function(i)
+            if not isMove(i) then return end
+            -- Tombol mouse dilepas saat game tidak fokus (alt-tab): InputEnded tidak pernah datang,
+            -- jadi drag diakhiri di sini supaya window tidak terus mengikuti mouse.
+            if i.UserInputType == Enum.UserInputType.MouseMovement
+                and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+                return finish(true)
+            end
+            local delta = i.Position - startPos
+            if delta.Magnitude > DRAG_THRESHOLD then moved = true end
+            onMove(delta)
+        end)
+        endConn = UserInputService.InputEnded:Connect(function(i)
+            if isPress(i) then finish(false) end
         end)
     end)
 end
@@ -573,10 +604,13 @@ function Library:CreateWindow(config)
         BackgroundColor3 = colors.border, BackgroundTransparency = 0.7,
     })
 
-    -- drag window lewat header
+    -- drag window lewat header; sebagian header selalu tersisa di layar supaya bisa digeser balik
     local dragStart
-    trackDrag(header, function() dragStart = win.Position end, function(delta)
-        win.Position = u2(dragStart.X.Scale, dragStart.X.Offset + delta.X, dragStart.Y.Scale, dragStart.Y.Offset + delta.Y)
+    trackDrag(header, function() dragStart = win.AbsolutePosition end, function(delta)
+        local screen, size = gui.AbsoluteSize, win.AbsoluteSize
+        local x = math.clamp(dragStart.X + delta.X, 80 - size.X, math.max(80 - size.X, screen.X - 80))
+        local y = math.clamp(dragStart.Y + delta.Y, 0, math.max(0, screen.Y - HEADER_H))
+        win.Position = u2(0, x, 0, y)
     end)
 
     -- resize lewat pojok kanan bawah
@@ -608,8 +642,12 @@ function Library:CreateWindow(config)
             BackgroundColor3 = colors.bg2, Image = "rbxassetid://118176705805619", ScaleType = Enum.ScaleType.Fit,
         }, { corner(6) })
         local iconStart
-        trackDrag(icon, function() iconStart = icon.Position end, function(delta)
-            icon.Position = u2(iconStart.X.Scale, iconStart.X.Offset + delta.X, iconStart.Y.Scale, iconStart.Y.Offset + delta.Y)
+        trackDrag(icon, function() iconStart = icon.AbsolutePosition end, function(delta)
+            local screen = gui.AbsoluteSize
+            icon.Position = u2(
+                0, math.clamp(iconStart.X + delta.X, 0, math.max(0, screen.X - 40)),
+                0, math.clamp(iconStart.Y + delta.Y, 0, math.max(0, screen.Y - 40))
+            )
         end, function(moved)
             if not icon then return end
             iconPos = icon.Position
@@ -1036,7 +1074,8 @@ function Library:_createBaseDropdown(parent, title, _imageId, items, configPath,
     end
 
     local function setOptions(list)
-        DropdownFunc.Options = table.clone(list or {})   -- salinan sendiri, tabel user tidak diubah
+        -- salinan sendiri (tabel user tidak diubah); argumen bukan tabel dianggap daftar kosong
+        DropdownFunc.Options = table.clone(type(list) == "table" and list or {})
         table.clear(allOptions)
         table.clear(labelByValue)
         for _, opt in ipairs(DropdownFunc.Options) do
@@ -1284,10 +1323,13 @@ end
 
 -- =============================== INPUT ================================
 -- Teks angka dikonversi ke number, kecuali deretan digit panjang (mis. ID) yang tetap string.
+-- inf/nan ("1e999", "nan") tidak dianggap angka supaya tidak merusak fitur (mis. WalkSpeed = inf).
 local function resolveInput(text)
     text = text == nil and "" or tostring(text)
     if #text > 15 and text:match("^%d+$") then return text end
-    return tonumber(text) or text
+    local number = tonumber(text)
+    if number and number == number and math.abs(number) ~= math.huge then return number end
+    return text
 end
 
 function Library:CreateInput(parent, label, configPath, defaultValue, callback, placeholder)
@@ -1434,7 +1476,8 @@ function Library:Initialize()
     end
     executeConfigCallbacks()
     self:AddConnection("playerRemoving", Players.PlayerRemoving:Connect(function(player)
-        if player ~= localPlayer then return end
+        -- hanya simpan perubahan yang tertunda (Auto Save OFF = memang tidak disimpan)
+        if player ~= Players.LocalPlayer or not isDirty then return end
         cancelThread(saveThread)
         saveThread = nil
         isDirty = false
@@ -1460,12 +1503,14 @@ NOTIFY.TEXT_W = NOTIFY.WIDTH - NOTIFY.TEXT_X - NOTIFY.PAD_R
 function Library:MakeNotify(config)
     config = config or {}
     if not self._gui then return end
+    local delay = tonumber(config.Delay)
+    if not delay or delay ~= delay then delay = 3 end   -- NaN membuat timer notify rusak
     local item = {
         title   = tostring(config.Title or "Notification"),
         desc    = tostring(config.Description or ""),
         content = tostring(config.Content or ""),
         color   = typeof(config.Color) == "Color3" and config.Color or colors.primary,
-        delay   = math.max(tonumber(config.Delay) or 3, 1),
+        delay   = math.clamp(delay, 1, 60),
     }
     item.key = item.title .. "\0" .. item.desc .. "\0" .. item.content
     self._notifQueue = self._notifQueue or {}
@@ -1739,6 +1784,17 @@ local ICONS = {
     home      = "rbxassetid://86450224791749",
 }
 
+-- Path config dari judul komponen. Nilai lama dari judul bertitik (versi sebelumnya
+-- menyimpannya bertingkat & bisa bentrok) dipindahkan otomatis ke kunci yang baru.
+local function configPath(prefix, title)
+    local path = prefix .. toKey(title)
+    local legacy = prefix .. tostring(title):gsub("%s+", "_")
+    if legacy ~= path and Config.Get(path) == nil and Config.Get(legacy) ~= nil then
+        Config.Set(path, Config.Get(legacy))
+    end
+    return path
+end
+
 local function createSection(lib, page, tabName, sectionTitle, isOpen)
     local container, expand = lib:CreateCategory(page, sectionTitle, isOpen)
     local Section = { _container = container, _library = lib, _layoutOrder = 0 }
@@ -1758,7 +1814,7 @@ local function createSection(lib, page, tabName, sectionTitle, isOpen)
     function Section:AddToggle(cfg)
         cfg = cfg or {}
         local title, callback = cfg.Title or "Toggle", cfg.Callback
-        local path = not cfg.NoSave and ("Toggles." .. toKey(title)) or nil
+        local path = not cfg.NoSave and configPath("Toggles.", title) or nil
         local toggle = lib:CreateToggle(container, title, path, callback, cfg.NoSave, cfg.Default or false)
         place(toggle.frame, title)
         return {
@@ -1774,7 +1830,7 @@ local function createSection(lib, page, tabName, sectionTitle, isOpen)
         cfg = cfg or {}
         local title, options = cfg.Title or "Dropdown", cfg.Options or {}
         local id = toKey(title)
-        local path = not cfg.NoSave and ((cfg.Multi and "MultiDropdowns." or "Dropdowns.") .. id) or nil
+        local path = not cfg.NoSave and configPath(cfg.Multi and "MultiDropdowns." or "Dropdowns.", title) or nil
         local frame = lib:_createBaseDropdown(container, title, nil, options, path, cfg.Callback, id, cfg.Default, cfg.Multi == true)
         place(frame, title)
         local dropdown = lib.flags[id]
@@ -1797,7 +1853,7 @@ local function createSection(lib, page, tabName, sectionTitle, isOpen)
     function Section:AddInput(cfg)
         cfg = cfg or {}
         local title = cfg.Title or "Input"
-        local path = not cfg.NoSave and ("Inputs." .. toKey(title)) or nil
+        local path = not cfg.NoSave and configPath("Inputs.", title) or nil
         local input = lib:CreateInput(container, title, path, cfg.Default or "", cfg.Callback, cfg.Placeholder)
         place(input.frame, title)
         return {
