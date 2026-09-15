@@ -1,0 +1,1813 @@
+--[[
+    LynxGUI (LynX) — Roblox UI Library
+    ---------------------------------------------------------------
+    Pola pemakaian:
+        local Library = loadstring(...)()
+        Library.ConfigSystem.SetDefaults({...})    -- (opsional) default config
+        local Window  = Library:Window({ Title = "LynX", Footer = "..." })
+        local Tab     = Window:AddTab({ Name = "Main", Icon = "player" })
+        local Section = Tab:AddSection("Fitur")
+        Section:AddToggle({ Title = "Auto Farm", Default = true, Callback = function(on) end })
+        Section:AddDropdown({ Title = "Target", Options = {...}, Multi = true, Callback = function(v) end })
+        Section:AddInput({ Title = "Speed", Default = 16, Callback = function(v) end })
+        Section:AddButton({ Title = "Teleport", Callback = function() end })
+        Section:AddParagraph({ Title = "Info", Content = "..." })
+        Library:MakeNotify({ Title = "Hi", Description = "...", Delay = 3 })
+        Library:Init()   -- WAJIB di baris paling bawah
+
+    Catatan:
+    - Nilai toggle/dropdown/input dipulihkan dari config, lalu callback-nya dijalankan
+      tepat sekali saat Library:Init() (tidak ada kasus "visual ON tapi fitur OFF").
+    - Judul komponen dipakai sebagai kunci config (mis. "Auto Farm" -> Toggles.Auto_Farm),
+      jadi gunakan judul yang unik per jenis komponen.
+    - NoSave = true: tidak disimpan & tidak diaktifkan otomatis saat Init.
+]]
+
+local Players          = game:GetService("Players")
+local CoreGui          = game:GetService("CoreGui")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+local TextService      = game:GetService("TextService")
+local localPlayer      = Players.LocalPlayer
+
+local u2, v2, rgb = UDim2.new, Vector2.new, Color3.fromRGB
+
+-- ================================ TEMA ================================
+local colors = {
+    primary    = rgb(255, 105, 0),
+    success    = rgb(34, 197, 94),
+    danger     = rgb(220, 50, 50),
+    bg1        = rgb(26, 13, 5),
+    bg2        = rgb(38, 19, 8),
+    bg3        = rgb(53, 27, 12),
+    bg4        = rgb(70, 36, 16),
+    text       = rgb(255, 250, 245),
+    textDim    = rgb(224, 205, 190),
+    textDimmer = rgb(180, 160, 145),
+    border     = rgb(90, 45, 20),
+}
+
+local isMobile    = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local WINDOW_SIZE = isMobile and v2(420, 280) or v2(560, 360)
+local MIN_SIZE    = isMobile and v2(380, 250) or v2(440, 300)
+local MAX_SIZE    = isMobile and v2(800, 600) or v2(1100, 760)
+local SIDEBAR_W, HEADER_H, TOPBAR_H, SECTION_H = 120, 34, 28, 30
+local PANEL_T, SECTION_T = 0.1, 0.3
+local FONT = { title = 15, header = 12, normal = 11, small = 10 }
+local BOLD, MEDIUM, REGULAR = Enum.Font.GothamBold, Enum.Font.GothamMedium, Enum.Font.Gotham
+local LEFT = Enum.TextXAlignment.Left
+
+-- =============================== HELPER ===============================
+-- Nilai default per class, supaya tiap pembuatan instance cukup menulis yang berbeda saja.
+local TEXT_DEFAULTS = { BorderSizePixel = 0, BackgroundTransparency = 1, Font = BOLD, TextSize = FONT.small, TextColor3 = colors.text }
+local DEFAULTS = {
+    Frame          = { BorderSizePixel = 0 },
+    ScrollingFrame = { BorderSizePixel = 0, BackgroundTransparency = 1, ScrollBarThickness = 0, CanvasSize = u2(0, 0, 0, 0) },
+    ImageLabel     = { BorderSizePixel = 0, BackgroundTransparency = 1 },
+    ImageButton    = { BorderSizePixel = 0, AutoButtonColor = false },
+    TextLabel      = { TextXAlignment = LEFT },
+    TextButton     = { Text = "", AutoButtonColor = false },
+    TextBox        = { Text = "", TextXAlignment = LEFT, ClearTextOnFocus = false, PlaceholderColor3 = colors.textDimmer },
+}
+for class, props in pairs(DEFAULTS) do
+    if class:find("^Text") then
+        for k, v in pairs(TEXT_DEFAULTS) do props[k] = v end
+    end
+end
+
+local function new(class, props, children)
+    local inst = Instance.new(class)
+    for k, v in pairs(DEFAULTS[class] or {}) do inst[k] = v end
+    for k, v in pairs(props) do
+        if k ~= "Parent" then inst[k] = v end
+    end
+    for _, child in ipairs(children or {}) do child.Parent = inst end
+    inst.Parent = props.Parent
+    return inst
+end
+
+-- corner() tanpa angka = bulat penuh (pill)
+local function corner(radius)
+    return new("UICorner", { CornerRadius = radius and UDim.new(0, radius) or UDim.new(1, 0) })
+end
+
+local function stroke(color, transparency, thickness)
+    return new("UIStroke", { Color = color or colors.border, Transparency = transparency or 0.4, Thickness = thickness or 1 })
+end
+
+local function fadeEnds(rotation)
+    return new("UIGradient", {
+        Rotation = rotation or 0,
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
+        }),
+    })
+end
+
+local function cancelThread(thread)
+    if thread then pcall(task.cancel, thread) end
+end
+
+local function safeCall(context, fn, ...)
+    if not fn then return true end
+    local ok, err = pcall(fn, ...)
+    if not ok then warn(("[LynxGUI] %s error: %s"):format(context, tostring(err))) end
+    return ok
+end
+
+local function isPress(input)
+    local t = input.UserInputType
+    return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+local function isMove(input)
+    local t = input.UserInputType
+    return t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch
+end
+
+local function toKey(title)
+    return (tostring(title):gsub("%s+", "_"))
+end
+
+local function textHeight(text, size, font, width)
+    if text == "" then return 0 end
+    return math.ceil(TextService:GetTextSize(text, size, font, v2(width, 10000)).Y)
+end
+
+-- <font color="rgb(r,g,b)"> -> <font color="#RRGGBB"> (format yang pasti didukung RichText)
+local function formatRichText(text)
+    if type(text) ~= "string" or text == "" then return "" end
+    return (text:gsub('<font color="rgb%s*%(%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*%)">', function(r, g, b)
+        local function clamp(n) return math.clamp(math.floor(tonumber(n) or 0), 0, 255) end
+        return ('<font color="#%02X%02X%02X">'):format(clamp(r), clamp(g), clamp(b))
+    end))
+end
+
+local function deepCopy(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local copy = {}
+    seen[value] = copy
+    for k, v in pairs(value) do copy[deepCopy(k, seen)] = deepCopy(v, seen) end
+    return copy
+end
+
+-- Tabel "list" (semua key angka / kosong) diganti utuh saat merge, bukan digabung per-index.
+-- Tanpa ini, item yang di-deselect di multi-dropdown tidak akan pernah terhapus dari config.
+local function isList(t)
+    if type(t) ~= "table" then return false end
+    for k in pairs(t) do
+        if type(k) ~= "number" then return false end
+    end
+    return true
+end
+
+local function mergeTables(target, source)
+    for k, v in pairs(source) do
+        if type(v) == "table" and type(target[k]) == "table" and not isList(v) and not isList(target[k]) then
+            mergeTables(target[k], v)
+        else
+            target[k] = deepCopy(v)
+        end
+    end
+end
+
+-- ================================ STATE ================================
+local Library = {
+    flags         = {},
+    pages         = {},
+    ConfigSystem  = {},
+    _navButtons   = {},
+    _connections  = {},
+    _searchIndex  = {},
+    _connSeq      = 0,
+    _initialized  = false,
+}
+
+-- Koneksi global (UserInputService, Players, dll) wajib lewat AddConnection supaya
+-- ikut diputus saat Cleanup. Koneksi ke instance GUI putus sendiri saat GUI dihapus.
+function Library:AddConnection(name, connection)
+    local old = self._connections[name]
+    if old then pcall(function() old:Disconnect() end) end
+    self._connections[name] = connection
+    return connection
+end
+
+function Library:_nextConnId()
+    self._connSeq = self._connSeq + 1
+    return self._connSeq
+end
+
+-- ============================ CONFIG SYSTEM ============================
+local CONFIG_FOLDER = "LynxGUI_Configs"
+local CONFIG_FILE   = CONFIG_FOLDER .. "/lynx_config.json"
+local Config        = Library.ConfigSystem
+local CurrentConfig, DefaultConfig = {}, {}
+local CallbackRegistry = {}
+local isDirty, saveThread = false, nil
+
+function Config.SetDefaults(defaults)
+    DefaultConfig = deepCopy(defaults or {})
+end
+
+-- Semua akses file dibungkus pcall: executor tanpa writefile/readfile tidak membuat error.
+function Config.Save()
+    return (pcall(function()
+        if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+        writefile(CONFIG_FILE, HttpService:JSONEncode(CurrentConfig))
+    end))
+end
+
+function Config.Load()
+    CurrentConfig = deepCopy(DefaultConfig)
+    local hasFile = false
+    local ok, loaded = pcall(function()
+        hasFile = isfile(CONFIG_FILE)
+        if not hasFile then return nil end
+        local raw = readfile(CONFIG_FILE)
+        return (raw and raw ~= "") and HttpService:JSONDecode(raw) or nil
+    end)
+    if ok and type(loaded) == "table" then
+        mergeTables(CurrentConfig, loaded)
+    elseif not ok and hasFile then
+        pcall(delfile, CONFIG_FILE)   -- file rusak / JSON tidak valid
+    end
+    return CurrentConfig
+end
+
+-- Pakai perbandingan nil eksplisit: pola `value or default` salah mengembalikan
+-- default ketika nilai tersimpan adalah `false`.
+function Config.Get(path, default)
+    if not path then return default end
+    local value = CurrentConfig
+    for key in path:gmatch("[^.]+") do
+        if type(value) ~= "table" then return default end
+        value = value[key]
+    end
+    if value == nil then return default end
+    return value
+end
+
+function Config.Set(path, value)
+    if not path then return end
+    local keys = {}
+    for key in path:gmatch("[^.]+") do keys[#keys + 1] = key end
+    local target = CurrentConfig
+    for i = 1, #keys - 1 do
+        if type(target[keys[i]]) ~= "table" then target[keys[i]] = {} end
+        target = target[keys[i]]
+    end
+    target[keys[#keys]] = value
+end
+
+function Config.Reset()
+    CurrentConfig = deepCopy(DefaultConfig)
+    Config.Save()
+end
+
+function Config.Delete()
+    -- batalkan autosave tertunda supaya file tidak ditulis ulang setelah dihapus
+    isDirty = false
+    cancelThread(saveThread)
+    saveThread = nil
+    pcall(function()
+        if isfile(CONFIG_FILE) then delfile(CONFIG_FILE) end
+    end)
+end
+
+local function markDirty()
+    if _G.AutoSaveEnabled == false then return end
+    isDirty = true
+    cancelThread(saveThread)
+    saveThread = task.delay(2, function()
+        saveThread = nil
+        if not isDirty then return end
+        -- tandai bersih SEBELUM Save: perubahan yang masuk selama Save akan dijadwalkan ulang
+        isDirty = false
+        Config.Save()
+    end)
+end
+
+-- Simpan nilai ke config lalu jadwalkan autosave.
+local function saveValue(path, value)
+    if not path then return end
+    Config.Set(path, value)
+    markDirty()
+end
+
+local function registerCallback(path, callback, kind, default, updateVisual)
+    if not path then return end
+    if CallbackRegistry[path] then
+        warn(("[LynxGUI] Judul komponen duplikat -> config '%s' dipakai lebih dari sekali; nilainya akan saling menimpa. Pakai judul yang unik."):format(path))
+    end
+    CallbackRegistry[path] = { path = path, callback = callback, kind = kind, default = default, updateVisual = updateVisual }
+end
+
+-- Visual dulu, lalu callback non-toggle (dropdown/input), terakhir toggle: fitur yang
+-- dinyalakan toggle sudah menerima pilihan dropdown/input yang benar.
+local function executeConfigCallbacks()
+    for _, entry in pairs(CallbackRegistry) do
+        if entry.updateVisual then
+            safeCall("updateVisual @" .. entry.path, entry.updateVisual, Config.Get(entry.path, entry.default))
+        end
+    end
+    for _, wantToggle in ipairs({ false, true }) do
+        for _, entry in pairs(CallbackRegistry) do
+            if entry.callback and (entry.kind == "toggle") == wantToggle then
+                safeCall("callback @" .. entry.path, entry.callback, Config.Get(entry.path, entry.default))
+            end
+        end
+    end
+end
+
+_G.AutoSaveEnabled = true
+function _G.GetConfigValue(key, default) return Config.Get(key, default) end
+function _G.SaveConfigValue(key, value)
+    Config.Set(key, value)
+    markDirty()
+end
+function _G.GetFullConfig() return CurrentConfig end
+
+function Library:Cleanup()
+    if isDirty then
+        isDirty = false
+        Config.Save()
+    end
+    cancelThread(saveThread)
+    saveThread = nil
+    cancelThread(self._initWatchdog)
+    self._initWatchdog = nil
+    for _, conn in pairs(self._connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    table.clear(self._connections)
+    table.clear(CallbackRegistry)
+    table.clear(self.flags)
+    table.clear(self.pages)
+    table.clear(self._navButtons)
+    table.clear(self._searchIndex)
+    self._gui, self._win, self._currentPage = nil, nil, nil
+    self._dropdown, self._openDropdown = nil, nil
+    self._pendingWindow = nil
+    self._connSeq = 0
+    self._initialized = false
+    self:_resetNotify()
+end
+
+-- =============================== WINDOW ===============================
+-- Lacak drag pada `handle`. onMove(delta) dipanggil selama digeser, onEnd(moved) saat
+-- dilepas. Koneksi UserInputService HANYA hidup selama drag berlangsung (tanpa beban idle).
+local function trackDrag(handle, onStart, onMove, onEnd)
+    local dragging = false
+    handle.InputBegan:Connect(function(input)
+        if dragging or not isPress(input) then return end
+        dragging = true
+        local startPos, moved = input.Position, false
+        local moveConn, endConn
+        if onStart then onStart() end
+        moveConn = UserInputService.InputChanged:Connect(function(i)
+            if not isMove(i) then return end
+            local delta = i.Position - startPos
+            if delta.Magnitude > 6 then moved = true end
+            onMove(delta)
+        end)
+        endConn = UserInputService.InputEnded:Connect(function(i)
+            if not isPress(i) then return end
+            dragging = false
+            moveConn:Disconnect()
+            endConn:Disconnect()
+            if onEnd then onEnd(moved) end
+        end)
+    end)
+end
+
+function Library:CreateWindow(config)
+    config = config or {}
+    local name = config.Name or "LynxGUI"
+    self:Cleanup()
+    local existing = CoreGui:FindFirstChild(name)
+    if existing then existing:Destroy() end
+
+    local gui = new("ScreenGui", {
+        Name = name, Parent = CoreGui, IgnoreGuiInset = true, ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 2147483647,
+    })
+    self._gui = gui
+    gui.Destroying:Connect(function()
+        if self._gui == gui then self:Cleanup() end
+    end)
+
+    local win = new("Frame", {
+        Parent = gui, ZIndex = 3,
+        Size = u2(0, WINDOW_SIZE.X, 0, WINDOW_SIZE.Y),
+        Position = u2(0.5, -WINDOW_SIZE.X / 2, 0.5, -WINDOW_SIZE.Y / 2),
+        BackgroundColor3 = colors.bg1, BackgroundTransparency = PANEL_T,
+    }, { corner(7) })
+    self._win = win
+
+    -- sidebar
+    self._sidebar = new("Frame", {
+        Parent = win, ZIndex = 4, ClipsDescendants = true, BackgroundTransparency = 1,
+        Size = u2(0, SIDEBAR_W, 1, -HEADER_H), Position = u2(0, 0, 0, HEADER_H),
+    })
+    new("Frame", {
+        Parent = self._sidebar, ZIndex = 4, Size = u2(0, 1, 1, 0), Position = u2(1, 0, 0, 0),
+        BackgroundColor3 = colors.border, BackgroundTransparency = 0.42,
+    })
+    self._navContainer = new("ScrollingFrame", {
+        Parent = self._sidebar, ZIndex = 5, Size = u2(1, -10, 1, -39), Position = u2(0, 5, 0, 34),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, { new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }) })
+
+    -- header: judul | logo | subtitle ........ discord  [-]
+    local header = new("TextButton", { Parent = win, ZIndex = 5, Size = u2(1, 0, 0, HEADER_H) })
+    new("Frame", {
+        Parent = header, ZIndex = 5, Size = u2(1, -20, 0, 1), Position = u2(0, 10, 1, -1),
+        BackgroundColor3 = colors.border, BackgroundTransparency = 0.62,
+    })
+    new("Frame", {
+        Parent = header, ZIndex = 6, Size = u2(0, 28, 0, 2), Position = u2(0.5, -14, 0, 4),
+        BackgroundColor3 = colors.primary, BackgroundTransparency = 0.35,
+    }, { corner(2) })
+    new("TextLabel", {
+        Parent = header, ZIndex = 6, Text = config.Title or "LynX", Size = u2(0, 80, 1, 0), Position = u2(0, 12, 0, 0),
+        TextSize = FONT.title, TextColor3 = colors.primary,
+    })
+    new("ImageLabel", {
+        Parent = header, ZIndex = 6, Image = "rbxassetid://104332967321169", ImageColor3 = colors.primary,
+        Size = u2(0, 16, 0, 16), Position = u2(0, 58, 0.5, -8),
+    })
+    new("Frame", {
+        Parent = header, ZIndex = 6, Size = u2(0, 1, 0, 16), Position = u2(0, 82, 0.5, -8),
+        BackgroundColor3 = colors.border, BackgroundTransparency = 0.2,
+    })
+    new("TextLabel", {
+        Parent = header, ZIndex = 6, Text = config.Subtitle or "", Size = u2(0, 200, 1, 0), Position = u2(0, 96, 0, 0),
+        TextColor3 = colors.textDim,
+    })
+
+    -- tombol minimize
+    local minStroke = stroke()
+    local minBtn = new("TextButton", {
+        Parent = header, ZIndex = 7, Size = u2(0, 22, 0, 22), Position = u2(1, -28, 0.5, -11),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = SECTION_T,
+    }, { corner(5), minStroke })
+    local minLine = new("Frame", {
+        Parent = minBtn, ZIndex = 8, AnchorPoint = v2(0.5, 0.5), Position = u2(0.5, 0, 0.5, 0),
+        Size = u2(0, 10, 0, 2), BackgroundColor3 = colors.primary,
+    }, { corner() })
+    local function setMinHover(on)
+        minBtn.BackgroundColor3 = on and colors.bg3 or colors.bg2
+        minStroke.Color = on and colors.primary or colors.border
+        minStroke.Transparency = on and 0.1 or 0.4
+        minLine.Size = u2(0, on and 12 or 10, 0, 2)
+    end
+    minBtn.MouseEnter:Connect(function() setMinHover(true) end)
+    minBtn.MouseLeave:Connect(function() setMinHover(false) end)
+
+    -- tombol discord (salin link invite)
+    local discordLink, discordText = "https://discord.gg/lynxx", "discord.gg/lynxx"
+    local discordTextW = math.ceil(TextService:GetTextSize(discordText, FONT.small, BOLD, v2(1000, 100)).X)
+    local discordW = discordTextW + 42
+    local discordBtn = new("TextButton", {
+        Parent = header, ZIndex = 7, Size = u2(0, discordW, 0, 22), Position = u2(1, -(34 + discordW), 0.5, -11),
+    })
+    new("ImageLabel", {
+        Parent = discordBtn, ZIndex = 8, Image = "rbxthumb://type=Asset&id=84640740142415&w=150&h=150",
+        ImageColor3 = colors.primary, Size = u2(0, 15, 0, 15), Position = u2(0, 8, 0.5, -7.5),
+    })
+    new("Frame", {
+        Parent = discordBtn, ZIndex = 8, Size = u2(0, 1, 0, 12), Position = u2(0, 28, 0.5, -6),
+        BackgroundColor3 = colors.primary, BackgroundTransparency = 0.45,
+    }, { fadeEnds(90) })
+    local discordLabel = new("TextLabel", {
+        Parent = discordBtn, ZIndex = 8, Text = discordText, TextColor3 = colors.primary,
+        TextTruncate = Enum.TextTruncate.AtEnd, Size = u2(0, discordTextW + 2, 1, 0), Position = u2(0, 33, 0, 0),
+    })
+    discordBtn.MouseEnter:Connect(function() discordLabel.TextColor3 = colors.text end)
+    discordBtn.MouseLeave:Connect(function() discordLabel.TextColor3 = colors.primary end)
+    discordBtn.MouseButton1Click:Connect(function()
+        local clip = setclipboard or toclipboard or writeclipboard
+            or (Clipboard and Clipboard.set) or (clipboard and clipboard.set)
+        if clip and pcall(clip, discordLink) then
+            self:MakeNotify({ Title = "Discord", Description = "Invite link disalin ke clipboard!" })
+        else
+            self:MakeNotify({ Title = "Discord", Description = discordLink, Delay = 6 })
+        end
+    end)
+
+    -- area konten + judul halaman
+    self._contentBg = new("Frame", {
+        Parent = win, ZIndex = 4, ClipsDescendants = true, BackgroundTransparency = 1,
+        Size = u2(1, -(SIDEBAR_W + 6), 1, -(HEADER_H + 3)), Position = u2(0, SIDEBAR_W + 3, 0, HEADER_H + 1),
+    })
+    local topBar = new("Frame", {
+        Parent = self._contentBg, ZIndex = 5, BackgroundTransparency = 1,
+        Size = u2(1, -4, 0, TOPBAR_H), Position = u2(0, 2, 0, 2),
+    })
+    new("Frame", {
+        Parent = topBar, ZIndex = 6, Size = u2(0, 3, 0, 16), Position = u2(0, 0, 0.5, -8),
+        BackgroundColor3 = colors.primary,
+    }, { corner() })
+    self._pageTitle = new("TextLabel", {
+        Parent = topBar, ZIndex = 6, Text = "Dashboard", TextSize = FONT.header,
+        Size = u2(1, -16, 1, 0), Position = u2(0, 10, 0, 0),
+    })
+    new("Frame", {
+        Parent = topBar, ZIndex = 5, Size = u2(1, -10, 0, 1), Position = u2(0, 5, 1, -1),
+        BackgroundColor3 = colors.border, BackgroundTransparency = 0.7,
+    })
+
+    -- drag window lewat header
+    local dragStart
+    trackDrag(header, function() dragStart = win.Position end, function(delta)
+        win.Position = u2(dragStart.X.Scale, dragStart.X.Offset + delta.X, dragStart.Y.Scale, dragStart.Y.Offset + delta.Y)
+    end)
+
+    -- resize lewat pojok kanan bawah
+    local resizeHandle = new("TextButton", {
+        Parent = win, ZIndex = 100, AnchorPoint = v2(1, 1), Size = u2(0, 18, 0, 18), Position = u2(1, 0, 1, 0),
+    })
+    for _, grip in ipairs({ { -3, -3 }, { -7, -3 }, { -3, -7 } }) do
+        new("Frame", {
+            Parent = resizeHandle, ZIndex = 101, AnchorPoint = v2(1, 1), Rotation = -45,
+            Size = u2(0, 6, 0, 2), Position = u2(1, grip[1], 1, grip[2]),
+            BackgroundColor3 = colors.textDim, BackgroundTransparency = 0.35,
+        }, { corner() })
+    end
+    local sizeStart
+    trackDrag(resizeHandle, function() sizeStart = win.AbsoluteSize end, function(delta)
+        win.Size = u2(
+            0, math.clamp(sizeStart.X + delta.X, MIN_SIZE.X, MAX_SIZE.X),
+            0, math.clamp(sizeStart.Y + delta.Y, MIN_SIZE.Y, MAX_SIZE.Y)
+        )
+    end)
+
+    -- minimize -> ikon kecil yang bisa digeser; klik (tanpa geser) untuk membuka lagi
+    local icon, iconPos = nil, u2(0, 20, 0, 100)
+    minBtn.MouseButton1Click:Connect(function()
+        if icon then return end
+        win.Visible = false
+        icon = new("ImageButton", {
+            Parent = gui, ZIndex = 50, Active = true, Size = u2(0, 40, 0, 40), Position = iconPos,
+            BackgroundColor3 = colors.bg2, Image = "rbxassetid://118176705805619", ScaleType = Enum.ScaleType.Fit,
+        }, { corner(6) })
+        local iconStart
+        trackDrag(icon, function() iconStart = icon.Position end, function(delta)
+            icon.Position = u2(iconStart.X.Scale, iconStart.X.Offset + delta.X, iconStart.Y.Scale, iconStart.Y.Offset + delta.Y)
+        end, function(moved)
+            if not icon then return end
+            iconPos = icon.Position
+            if moved then return end
+            icon:Destroy()
+            icon = nil
+            win.Visible = true
+        end)
+    end)
+
+    self:_createSearchBar()
+    return self
+end
+
+-- ============================= SEARCH BAR =============================
+function Library:_createSearchBar()
+    local SEARCH_W, SEARCH_H = SIDEBAR_W - 12, 22
+    local ROW_H, ROW_GAP, LIST_PAD, MAX_PANEL_H = 32, 3, 4, 168
+
+    local searchStroke = stroke()
+    local container = new("Frame", {
+        Parent = self._sidebar, Name = "SearchBar", ZIndex = 7,
+        Size = u2(0, SEARCH_W, 0, SEARCH_H), Position = u2(0, 6, 0, 6),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = SECTION_T,
+    }, { corner(5), searchStroke })
+    new("ImageLabel", {
+        Parent = container, ZIndex = 8, Image = "rbxassetid://109869955247116", ImageColor3 = colors.textDimmer,
+        Size = u2(0, 14, 0, 14), Position = u2(0, 6, 0.5, -7),
+    })
+    local searchBox = new("TextBox", {
+        Parent = container, ZIndex = 9, PlaceholderText = "Search feature...",
+        Size = u2(1, -46, 1, 0), Position = u2(0, 26, 0, 0),
+    })
+    local clearBtn = new("TextButton", {
+        Parent = container, ZIndex = 9, Visible = false, Text = "×", TextSize = 14, TextColor3 = colors.textDimmer,
+        Size = u2(0, 16, 0, 16), Position = u2(1, -20, 0.5, -8),
+    })
+
+    local panel = new("Frame", {
+        Parent = self._win, Name = "SearchResults", ZIndex = 60, Visible = false,
+        Size = u2(0, SEARCH_W, 0, ROW_H + LIST_PAD * 2), Position = u2(0, 6, 0, HEADER_H + SEARCH_H + 9),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = PANEL_T,
+    }, { corner(5), stroke(nil, 0.35) })
+    local list = new("ScrollingFrame", {
+        Parent = panel, ZIndex = 61, Size = u2(1, -6, 1, -6), Position = u2(0, 3, 0, 3),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, {
+        new("UIListLayout", { Padding = UDim.new(0, ROW_GAP), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("UIPadding", { PaddingRight = UDim.new(0, 1) }),
+    })
+    local emptyLabel = new("TextLabel", {
+        Parent = panel, ZIndex = 62, Visible = false, Text = "No features found", TextColor3 = colors.textDimmer,
+        Size = u2(1, -16, 1, 0), Position = u2(0, 8, 0, 0),
+    })
+
+    local function highlight(frame)
+        local old = frame:FindFirstChild("__SearchHL")
+        if old then old:Destroy() end
+        local hl = new("UIStroke", { Parent = frame, Name = "__SearchHL", Color = colors.primary, Thickness = 2 })
+        task.delay(1, function()
+            if not hl.Parent then return end
+            local tween = TweenService:Create(hl, TweenInfo.new(0.45), { Transparency = 1 })
+            tween.Completed:Connect(function() hl:Destroy() end)
+            tween:Play()
+        end)
+    end
+
+    local function goToFeature(entry)
+        panel.Visible = false
+        searchBox.Text = ""
+        if entry.pageName then self:_switchPage(entry.pageName) end
+        safeCall("search expand", entry.expand)
+        task.defer(function()
+            local frame = entry.frame
+            if not frame.Parent then return end
+            task.wait()   -- tunggu layout section yang baru dibuka
+            local page = self.pages[entry.pageName]
+            if page then
+                local content = page.content
+                local y = frame.AbsolutePosition.Y - content.AbsolutePosition.Y + content.CanvasPosition.Y
+                content.CanvasPosition = v2(0, math.max(0, y - 4))
+            end
+            highlight(frame)
+        end)
+    end
+
+    local rows = {}
+    local function getRow(i)
+        if rows[i] then return rows[i] end
+        local button = new("TextButton", {
+            Parent = list, ZIndex = 62, Size = u2(1, 0, 0, ROW_H),
+            BackgroundColor3 = colors.bg3, BackgroundTransparency = SECTION_T,
+        }, { corner(4) })
+        new("Frame", {
+            Parent = button, ZIndex = 63, Size = u2(0, 3, 1, -8), Position = u2(0, 0, 0, 4),
+            BackgroundColor3 = colors.primary,
+        }, { corner() })
+        local row = { button = button }
+        row.name = new("TextLabel", {
+            Parent = button, ZIndex = 63, TextTruncate = Enum.TextTruncate.AtEnd,
+            Size = u2(1, -14, 0, 15), Position = u2(0, 9, 0, 4),
+        })
+        row.meta = new("TextLabel", {
+            Parent = button, ZIndex = 63, Font = MEDIUM, TextSize = 9, TextColor3 = colors.textDimmer,
+            TextTruncate = Enum.TextTruncate.AtEnd, Size = u2(1, -14, 0, 11), Position = u2(0, 9, 0, 18),
+        })
+        button.MouseEnter:Connect(function() button.BackgroundColor3 = colors.bg4 end)
+        button.MouseLeave:Connect(function() button.BackgroundColor3 = colors.bg3 end)
+        button.MouseButton1Click:Connect(function()
+            if row.entry then goToFeature(row.entry) end
+        end)
+        rows[i] = row
+        return row
+    end
+
+    local function doSearch(query)
+        query = query:lower():match("^%s*(.-)%s*$")
+        local count = 0
+        if query ~= "" then
+            for _, entry in ipairs(self._searchIndex) do
+                if entry.frame.Parent and entry.lname:find(query, 1, true) then
+                    count = count + 1
+                    local row = getRow(count)
+                    row.entry = entry
+                    row.name.Text = entry.name
+                    row.meta.Text = entry.sectionTitle ~= "" and (entry.pageName .. " • " .. entry.sectionTitle) or entry.pageName
+                    row.button.LayoutOrder = count
+                    row.button.BackgroundColor3 = colors.bg3
+                    row.button.Visible = true
+                end
+            end
+        end
+        for i = count + 1, #rows do
+            rows[i].button.Visible = false
+            rows[i].entry = nil
+        end
+        emptyLabel.Visible = count == 0
+        local contentH = count * ROW_H + math.max(0, count - 1) * ROW_GAP + LIST_PAD * 2
+        panel.Size = u2(0, SEARCH_W, 0, count == 0 and (ROW_H + LIST_PAD * 2) or math.min(contentH, MAX_PANEL_H))
+        panel.Visible = query ~= ""
+    end
+
+    local searchThread
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        local text = searchBox.Text
+        cancelThread(searchThread)
+        searchThread = nil
+        clearBtn.Visible = text ~= ""
+        if text == "" then return doSearch("") end
+        searchThread = task.delay(0.1, function()
+            searchThread = nil
+            doSearch(text)
+        end)
+    end)
+    searchBox.Focused:Connect(function()
+        searchStroke.Color, searchStroke.Transparency = colors.primary, 0.1
+    end)
+    searchBox.FocusLost:Connect(function()
+        searchStroke.Color, searchStroke.Transparency = colors.border, 0.4
+    end)
+    clearBtn.MouseButton1Click:Connect(function() searchBox.Text = "" end)
+    clearBtn.MouseEnter:Connect(function() clearBtn.TextColor3 = colors.primary end)
+    clearBtn.MouseLeave:Connect(function() clearBtn.TextColor3 = colors.textDimmer end)
+end
+
+-- ================================ PAGES ================================
+function Library:CreatePage(name, title, imageId, order)
+    if self.pages[name] then
+        warn(("[LynxGUI] Nama tab duplikat -> '%s'. Tab lama akan tertimpa; pakai nama tab yang unik."):format(tostring(name)))
+    end
+    local page = new("Frame", {
+        Parent = self._contentBg, ZIndex = 5, Visible = false, ClipsDescendants = true, BackgroundTransparency = 1,
+        Size = u2(1, -12, 1, -(TOPBAR_H + 10)), Position = u2(0, 6, 0, TOPBAR_H + 6),
+    })
+    local content = new("ScrollingFrame", {
+        Parent = page, ZIndex = 5, Size = u2(1, 0, 1, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, {
+        new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2), PaddingRight = UDim.new(0, 4) }),
+    })
+    self.pages[name] = { frame = page, title = title, content = content }
+
+    local btn = new("TextButton", {
+        Parent = self._navContainer, ZIndex = 6, LayoutOrder = order or 999,
+        Size = u2(1, 0, 0, 28), BackgroundColor3 = colors.bg2, BackgroundTransparency = 1,
+    }, { corner(5) })
+    self._navButtons[name] = {
+        btn = btn,
+        indicator = new("Frame", {
+            Parent = btn, ZIndex = 7, Visible = false, Size = u2(0, 3, 0, 16), Position = u2(0, 0, 0.5, -8),
+            BackgroundColor3 = colors.primary,
+        }, { corner() }),
+        icon = new("ImageLabel", {
+            Parent = btn, ZIndex = 7, Image = imageId or "", ImageColor3 = colors.textDim,
+            Size = u2(0, 15, 0, 15), Position = u2(0, 8, 0.5, -7),
+        }),
+        label = new("TextLabel", {
+            Parent = btn, ZIndex = 7, Text = name, TextSize = FONT.normal, TextColor3 = colors.textDim,
+            Size = u2(1, -35, 1, 0), Position = u2(0, 28, 0, 0),
+        }),
+    }
+    btn.MouseButton1Click:Connect(function() self:_switchPage(name) end)
+    return content
+end
+
+function Library:SetFirstPage(name, title)
+    if title and self.pages[name] then self.pages[name].title = title end
+    self:_switchPage(name)
+end
+
+function Library:_switchPage(name)
+    if self._currentPage == name or not self.pages[name] then return end
+    self._currentPage = name
+    for pageName, page in pairs(self.pages) do
+        page.frame.Visible = pageName == name
+    end
+    for pageName, nav in pairs(self._navButtons) do
+        local active = pageName == name
+        nav.btn.BackgroundTransparency = active and SECTION_T or 1
+        nav.icon.ImageColor3 = active and colors.primary or colors.textDim
+        nav.label.TextColor3 = active and colors.text or colors.textDim
+        nav.indicator.Visible = active
+    end
+    self._pageTitle.Text = self.pages[name].title or name
+end
+
+-- ============================== SECTION ===============================
+function Library:CreateCategory(parent, title, startOpen)
+    local frame = new("Frame", {
+        Parent = parent, ZIndex = 6, Size = u2(1, 0, 0, SECTION_H),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = SECTION_T,
+    }, { corner(4), new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }) })
+    local header = new("TextButton", { Parent = frame, ZIndex = 7, LayoutOrder = 1, Size = u2(1, 0, 0, SECTION_H) })
+    new("TextLabel", {
+        Parent = header, ZIndex = 8, Text = title, TextSize = FONT.normal,
+        Size = u2(1, -32, 1, 0), Position = u2(0, 10, 0, 0),
+    })
+    local arrow = new("TextLabel", {
+        Parent = header, ZIndex = 8, Text = "▼", TextColor3 = colors.primary,
+        TextXAlignment = Enum.TextXAlignment.Center, Size = u2(0, 18, 1, 0), Position = u2(1, -24, 0, 0),
+    })
+    local layout = new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder })
+    local content = new("Frame", {
+        Parent = frame, ZIndex = 7, LayoutOrder = 2, BackgroundTransparency = 1,
+        Size = u2(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    }, {
+        new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 6) }),
+        layout,
+    })
+
+    local isOpen = startOpen == true
+    local function updateHeight()
+        local h = isOpen and (SECTION_H + layout.AbsoluteContentSize.Y + 6) or SECTION_H
+        frame.Size = u2(1, 0, 0, h)
+    end
+    local function setOpen(state)
+        isOpen = state
+        content.Visible = state
+        arrow.Rotation = state and 180 or 0
+        updateHeight()
+    end
+    setOpen(isOpen)
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateHeight)
+    header.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
+    return content, function()
+        if not isOpen then setOpen(true) end
+    end
+end
+
+-- =============================== TOGGLE ===============================
+function Library:CreateToggle(parent, label, configPath, callback, disableSave, defaultValue)
+    local path = not disableSave and configPath or nil
+    local flagKey = configPath or label
+    local frame = new("Frame", { Parent = parent, ZIndex = 7, Size = u2(1, 0, 0, 28), BackgroundTransparency = 1 })
+    new("TextLabel", { Parent = frame, ZIndex = 8, Text = label, Size = u2(1, -45, 1, 0) })
+    local track = new("Frame", {
+        Parent = frame, ZIndex = 8, Size = u2(0, 34, 0, 18), Position = u2(1, -34, 0.5, -9),
+        BackgroundColor3 = colors.bg3,
+    }, { corner() })
+    local knob = new("Frame", {
+        Parent = track, ZIndex = 9, Size = u2(0, 14, 0, 14), Position = u2(0, 2, 0.5, -7),
+        BackgroundColor3 = colors.textDim,
+    }, { corner() })
+    local button = new("TextButton", { Parent = track, ZIndex = 10, Size = u2(1, 0, 1, 0) })
+
+    local on = Config.Get(path, defaultValue or false)
+    local function apply(value)
+        on = value == true
+        track.BackgroundColor3 = on and colors.primary or colors.bg3
+        knob.Position = on and u2(1, -16, 0.5, -7) or u2(0, 2, 0.5, -7)
+        knob.BackgroundColor3 = on and colors.text or colors.textDim
+        self.flags[flagKey] = on
+    end
+    apply(on)
+
+    button.MouseButton1Click:Connect(function()
+        apply(not on)
+        saveValue(path, on)
+        safeCall("toggle '" .. tostring(label) .. "'", callback, on)
+    end)
+    registerCallback(path, callback, "toggle", defaultValue or false, apply)
+
+    return {
+        frame = frame,
+        set = function(value)
+            apply(value)
+            saveValue(path, on)
+        end,
+        get = function() return on end,
+    }
+end
+
+-- ============================== DROPDOWN ==============================
+-- Satu panel samping dipakai bersama semua dropdown; tiap dropdown punya "halaman"
+-- sendiri di dalamnya yang cukup di-Visible-kan saat dibuka.
+function Library:_initDropdownSystem()
+    if self._dropdown then return self._dropdown end
+    local overlay = new("Frame", {
+        Parent = self._win, Name = "DropdownOverlay", ZIndex = 150, Visible = false, ClipsDescendants = true,
+        Size = u2(1, 0, 1, -HEADER_H), Position = u2(0, 0, 0, HEADER_H),
+        BackgroundColor3 = colors.bg1, BackgroundTransparency = 0.95,
+    })
+    local closer = new("TextButton", { Parent = overlay, ZIndex = 151, Size = u2(1, 0, 1, 0) })
+    local panel = new("Frame", {
+        Parent = overlay, Name = "DropdownPanel", ZIndex = 152, ClipsDescendants = true, AnchorPoint = v2(1, 0.5),
+        Size = u2(0, 160, 1, -16), Position = u2(1, -11, 0.5, 0),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = 0.09,
+    }, { corner(6), stroke(nil, 0.45) })
+    closer.Activated:Connect(function() self:_hideDropdown() end)
+    self._dropdown = { overlay = overlay, panel = panel }
+    return self._dropdown
+end
+
+function Library:_showDropdown(container)
+    local dropdown = self:_initDropdownSystem()
+    if self._openDropdown and self._openDropdown ~= container then
+        self._openDropdown.Visible = false
+    end
+    self._openDropdown = container
+    container.Visible = true
+    dropdown.overlay.Visible = true
+end
+
+function Library:_hideDropdown()
+    if self._openDropdown then self._openDropdown.Visible = false end
+    self._openDropdown = nil
+    if self._dropdown then self._dropdown.overlay.Visible = false end
+end
+
+local function normalizeOption(opt)
+    local label, value = tostring(opt), opt
+    if type(opt) == "table" and opt.Label and opt.Value ~= nil then
+        label, value = tostring(opt.Label), opt.Value
+    end
+    return { label = label, value = value, lower = label:lower() }
+end
+
+function Library:_createBaseDropdown(parent, title, _imageId, items, configPath, onSelect, uniqueId, defaultValue, isMulti)
+    local dropdown = self:_initDropdownSystem()
+    local ROW_H, ROW_GAP, MIN_POOL, MAX_POOL, MAX_LABELS = 26, 3, 12, 48, 3
+    local ROW_STRIDE = ROW_H + ROW_GAP
+    local defaultText = isMulti and "Select Options" or "Select Option"
+
+    -- tampilan tertutup
+    local frame = new("Frame", {
+        Parent = parent, Name = uniqueId or (isMulti and "MultiDropdown" or "Dropdown"), ZIndex = 7,
+        Size = u2(1, 0, 0, 28), BackgroundTransparency = 1,
+    })
+    new("TextLabel", {
+        Parent = frame, ZIndex = 8, Text = title or (isMulti and "Multi Select" or "Dropdown"), Size = u2(0.5, 0, 1, 0),
+    })
+    local selectFrame = new("Frame", {
+        Parent = frame, ZIndex = 8, AnchorPoint = v2(1, 0.5), Position = u2(1, 0, 0.5, 0), Size = u2(0.48, 0, 0, 22),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = SECTION_T,
+    }, { corner(4), stroke(nil, 0.5) })
+    local selectedLabel = new("TextLabel", {
+        Parent = selectFrame, ZIndex = 9, Text = defaultText, TextColor3 = colors.textDim,
+        TextTruncate = Enum.TextTruncate.AtEnd, AnchorPoint = v2(0, 0.5), Position = u2(0, 8, 0.5, 0), Size = u2(1, -24, 1, 0),
+    })
+    new("ImageLabel", {
+        Parent = selectFrame, ZIndex = 9, Image = "rbxassetid://6031091004", ImageColor3 = colors.primary,
+        AnchorPoint = v2(1, 0.5), Position = u2(1, -6, 0.5, 0), Size = u2(0, 11, 0, 11),
+    })
+    local openButton = new("TextButton", { Parent = frame, ZIndex = 10, Size = u2(1, 0, 1, 0) })
+
+    -- halaman di panel samping
+    local container = new("Frame", { Parent = dropdown.panel, ZIndex = 153, Visible = false, Size = u2(1, 0, 1, 0), BackgroundTransparency = 1 })
+    local searchBox = new("TextBox", {
+        Parent = container, ZIndex = 154, PlaceholderText = "Search...",
+        Size = u2(1, -8, 0, 24), Position = u2(0, 4, 0, 4),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = SECTION_T,
+    }, { corner(4), stroke(nil, 0.5), new("UIPadding", { PaddingLeft = UDim.new(0, 8) }) })
+    local scroll = new("ScrollingFrame", {
+        Parent = container, ZIndex = 154, Size = u2(1, -8, 1, -36), Position = u2(0, 4, 0, 32),
+    })
+
+    -- Multi-select memakai array milik dropdown ini sendiri; copyValue memastikan tidak pernah
+    -- berbagi referensi dengan config, tabel Default user, atau nilai yang dikirim ke callback.
+    local function copyValue(v)
+        if not isMulti then return v end
+        local out = {}
+        if type(v) == "table" then
+            for i = 1, #v do out[i] = v[i] end
+        end
+        return out
+    end
+
+    local DropdownFunc = { Value = copyValue(Config.Get(configPath, defaultValue)), Options = items or {} }
+    local allOptions, filtered, selectedSet, labelByValue = {}, {}, {}, {}
+    local rows, lastCanvasH, needsRefresh, searchThread = {}, nil, false, nil
+
+    local function isOpen() return self._openDropdown == container end
+
+    local function emit(value)
+        if not onSelect then return end
+        if isMulti then
+            safeCall("dropdown '" .. tostring(title) .. "'", onSelect, copyValue(value))
+        else
+            safeCall("dropdown '" .. tostring(title) .. "'", onSelect, value ~= nil and tostring(value) or "")
+        end
+    end
+
+    local function setOptions(list)
+        DropdownFunc.Options = table.clone(list or {})   -- salinan sendiri, tabel user tidak diubah
+        table.clear(allOptions)
+        table.clear(labelByValue)
+        for _, opt in ipairs(DropdownFunc.Options) do
+            local option = normalizeOption(opt)
+            allOptions[#allOptions + 1] = option
+            if labelByValue[option.value] == nil then labelByValue[option.value] = option.label end
+        end
+    end
+
+    local function applyFilter()
+        local query = searchBox.Text:lower()
+        table.clear(filtered)
+        for _, opt in ipairs(allOptions) do
+            if query == "" or opt.lower:find(query, 1, true) then filtered[#filtered + 1] = opt end
+        end
+    end
+
+    local function updateSelection()
+        table.clear(selectedSet)
+        if isMulti then
+            for _, v in ipairs(DropdownFunc.Value) do selectedSet[v] = true end
+        elseif DropdownFunc.Value ~= nil then
+            selectedSet[DropdownFunc.Value] = true
+        end
+        -- label ringkas (maks 3 item + "(+N)") supaya string tidak memanjang tanpa batas
+        local text
+        if isMulti then
+            local labels, count = {}, 0
+            for _, v in ipairs(DropdownFunc.Value) do
+                if labelByValue[v] then
+                    count = count + 1
+                    if count <= MAX_LABELS then labels[count] = labelByValue[v] end
+                end
+            end
+            if count > 0 then
+                text = table.concat(labels, ", ") .. (count > MAX_LABELS and (" (+%d)"):format(count - MAX_LABELS) or "")
+            end
+        elseif DropdownFunc.Value ~= nil then
+            text = labelByValue[DropdownFunc.Value] or tostring(DropdownFunc.Value)
+        end
+        selectedLabel.Text = text or defaultText
+    end
+
+    -- Hanya row yang terlihat yang dibuat & di-paint (virtual list), jadi ratusan opsi tetap ringan.
+    -- State row disimpan di tabel Lua (bukan attribute) dan property hanya ditulis jika berubah.
+    local function paintRow(row, opt, force)
+        local selected = selectedSet[opt.value] == true
+        if not force and row.opt == opt and row.selected == selected then return end
+        row.opt, row.selected = opt, selected
+        row.choose.Size = selected and u2(0, 3, 0, 16) or u2(0, 0, 0, 0)
+        row.frame.BackgroundColor3 = selected and colors.bg3 or colors.bg2
+        row.frame.BackgroundTransparency = selected and PANEL_T or 0.5
+        row.text.TextColor3 = selected and colors.text or colors.textDim
+        row.text.Text = opt.label
+    end
+
+    local function onRowClick(row)
+        local opt = row.index and filtered[row.index]
+        if not opt then return end
+        if not isMulti then return DropdownFunc:Set(opt.value) end
+        local newList, removed = {}, false
+        for _, v in ipairs(DropdownFunc.Value) do
+            if v == opt.value then removed = true else newList[#newList + 1] = v end
+        end
+        if not removed then newList[#newList + 1] = opt.value end
+        DropdownFunc:Set(newList)
+    end
+
+    local function buildRow()
+        local rowFrame = new("Frame", {
+            Parent = scroll, ZIndex = 155, Visible = false, Size = u2(1, 0, 0, ROW_H),
+            BackgroundColor3 = colors.bg2, BackgroundTransparency = 0.5,
+        }, { corner(3) })
+        local row = {
+            frame = rowFrame,
+            text = new("TextLabel", {
+                Parent = rowFrame, ZIndex = 156, TextTruncate = Enum.TextTruncate.AtEnd,
+                Size = u2(1, -16, 1, 0), Position = u2(0, 8, 0, 0),
+            }),
+            choose = new("Frame", {
+                Parent = rowFrame, ZIndex = 156, AnchorPoint = v2(0, 0.5), Position = u2(0, 2, 0.5, 0),
+                Size = u2(0, 0, 0, 0), BackgroundColor3 = colors.primary,
+            }, { corner(3) }),
+        }
+        local button = new("TextButton", { Parent = rowFrame, ZIndex = 157, Size = u2(1, 0, 1, 0) })
+        rowFrame.MouseEnter:Connect(function()
+            if not row.index then return end
+            rowFrame.BackgroundColor3 = colors.bg4
+        end)
+        rowFrame.MouseLeave:Connect(function()
+            if row.opt then paintRow(row, row.opt, true) end
+        end)
+        button.Activated:Connect(function() onRowClick(row) end)
+        rows[#rows + 1] = row
+    end
+
+    local function refreshVisible()
+        if #rows == 0 then return end
+        local viewH = scroll.AbsoluteSize.Y
+        if viewH <= 0 then
+            needsRefresh = true
+            return
+        end
+        needsRefresh = false
+        local total = #filtered
+        local canvasH = math.max(0, total * ROW_STRIDE - ROW_GAP)
+        -- tulis CanvasSize hanya jika berubah (menulisnya bisa memicu refresh lagi)
+        if lastCanvasH ~= canvasH then
+            lastCanvasH = canvasH
+            scroll.CanvasSize = u2(0, 0, 0, canvasH)
+        end
+        local first = math.max(1, math.floor(scroll.CanvasPosition.Y / ROW_STRIDE) + 1)
+        local capacity = math.min(math.floor(viewH / ROW_STRIDE) + 2, MAX_POOL)
+        while #rows < capacity do buildRow() end
+        local last = math.min(total, first + capacity - 1)
+        for i, row in ipairs(rows) do
+            local index = first + i - 1
+            local visible = index <= last
+            row.index = visible and index or nil
+            if visible then
+                local y = (index - 1) * ROW_STRIDE
+                if row.y ~= y then
+                    row.y = y
+                    row.frame.Position = u2(0, 0, 0, y)
+                end
+                paintRow(row, filtered[index])
+            end
+            if row.visible ~= visible then
+                row.visible = visible
+                row.frame.Visible = visible
+            end
+        end
+    end
+
+    local function ensureRows()
+        if #rows > 0 then return end
+        local viewH = scroll.AbsoluteSize.Y
+        local count = viewH > 0 and math.max(MIN_POOL, math.floor(viewH / ROW_STRIDE) + 2) or MIN_POOL
+        for _ = 1, math.min(count, MAX_POOL) do buildRow() end
+        scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(refreshVisible)
+        scroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+            if isOpen() then refreshVisible() end
+        end)
+    end
+
+    local function refresh()
+        updateSelection()
+        if isOpen() then refreshVisible() end
+    end
+
+    function DropdownFunc:Set(value)
+        DropdownFunc.Value = copyValue(value)
+        saveValue(configPath, copyValue(DropdownFunc.Value))
+        refresh()
+        emit(DropdownFunc.Value)
+    end
+    function DropdownFunc:SetValue(value) DropdownFunc:Set(value) end
+    function DropdownFunc:GetValue() return copyValue(DropdownFunc.Value) end
+
+    function DropdownFunc:Clear()
+        setOptions({})
+        DropdownFunc.Value = copyValue(nil)
+        applyFilter()
+        scroll.CanvasPosition = v2(0, 0)
+        refresh()
+    end
+
+    function DropdownFunc:AddOption(opt)
+        local option = normalizeOption(opt)
+        local query = searchBox.Text:lower()
+        table.insert(DropdownFunc.Options, opt)
+        allOptions[#allOptions + 1] = option
+        if labelByValue[option.value] == nil then labelByValue[option.value] = option.label end
+        if query == "" or option.lower:find(query, 1, true) then filtered[#filtered + 1] = option end
+        refresh()
+    end
+
+    function DropdownFunc:SetValues(list, selecting)
+        setOptions(list)
+        DropdownFunc.Value = copyValue(selecting)
+        saveValue(configPath, copyValue(DropdownFunc.Value))
+        applyFilter()
+        scroll.CanvasPosition = v2(0, 0)
+        refresh()
+        emit(DropdownFunc.Value)
+    end
+
+    -- Ganti daftar opsi; pilihan lama yang masih ada di daftar baru dipertahankan.
+    function DropdownFunc:Refresh(list)
+        setOptions(list)
+        if isMulti then
+            local valid = {}
+            for _, v in ipairs(DropdownFunc.Value) do
+                if labelByValue[v] ~= nil then valid[#valid + 1] = v end
+            end
+            DropdownFunc.Value = valid
+        elseif DropdownFunc.Value ~= nil and labelByValue[DropdownFunc.Value] == nil then
+            DropdownFunc.Value = nil
+        end
+        saveValue(configPath, copyValue(DropdownFunc.Value))
+        applyFilter()
+        refresh()
+    end
+
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        cancelThread(searchThread)
+        searchThread = task.delay(searchBox.Text == "" and 0 or 0.08, function()
+            searchThread = nil
+            applyFilter()
+            scroll.CanvasPosition = v2(0, 0)
+            refreshVisible()
+        end)
+    end)
+
+    openButton.Activated:Connect(function()
+        ensureRows()
+        searchBox.Text = ""
+        applyFilter()
+        scroll.CanvasPosition = v2(0, 0)
+        self:_showDropdown(container)
+        task.defer(function()
+            refreshVisible()
+            if needsRefresh then task.defer(refreshVisible) end
+        end)
+    end)
+
+    setOptions(items)
+    applyFilter()
+    updateSelection()
+    registerCallback(configPath, onSelect and emit, isMulti and "multidropdown" or "dropdown",
+        isMulti and (defaultValue or {}) or defaultValue,
+        function(value)
+            DropdownFunc.Value = copyValue(value)
+            refresh()
+        end)
+    if uniqueId then self.flags[uniqueId] = DropdownFunc end
+    return frame
+end
+
+function Library:CreateDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValue)
+    return self:_createBaseDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValue, false)
+end
+
+function Library:CreateMultiDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValues)
+    return self:_createBaseDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValues, true)
+end
+
+-- =============================== INPUT ================================
+-- Teks angka dikonversi ke number, kecuali deretan digit panjang (mis. ID) yang tetap string.
+local function resolveInput(text)
+    text = text == nil and "" or tostring(text)
+    if #text > 15 and text:match("^%d+$") then return text end
+    return tonumber(text) or text
+end
+
+function Library:CreateInput(parent, label, configPath, defaultValue, callback, placeholder)
+    local frame = new("Frame", { Parent = parent, ZIndex = 7, Size = u2(1, 0, 0, 28), BackgroundTransparency = 1 })
+    new("TextLabel", { Parent = frame, ZIndex = 8, Text = label, Size = u2(0.52, 0, 1, 0) })
+    local box = new("Frame", {
+        Parent = frame, ZIndex = 8, Size = u2(0.45, 0, 0, 24), Position = u2(0.55, 0, 0.5, -12),
+        BackgroundColor3 = colors.bg3, BackgroundTransparency = PANEL_T,
+    }, { corner(4) })
+    local initial = Config.Get(configPath, defaultValue)
+    local textBox = new("TextBox", {
+        Parent = box, ZIndex = 9, TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = initial ~= nil and tostring(initial) or "",
+        PlaceholderText = (placeholder and placeholder ~= "") and tostring(placeholder) or "Enter Value",
+        Size = u2(1, -16, 1, 0), Position = u2(0, 8, 0, 0),
+    })
+    local context = "input '" .. tostring(label) .. "'"
+
+    local function commit(raw)
+        local value = resolveInput(raw)
+        textBox.Text = tostring(value)
+        saveValue(configPath, value)
+        safeCall(context, callback, value)
+    end
+    textBox.FocusLost:Connect(function() commit(textBox.Text) end)
+
+    if configPath then
+        -- nilai tersimpan: callback dijalankan sekali saat Library:Init()
+        registerCallback(configPath, callback and function(value)
+            callback(resolveInput(value))
+        end, "input", defaultValue, function(value)
+            if value == nil then value = defaultValue end
+            textBox.Text = value ~= nil and tostring(value) or ""
+        end)
+    else
+        -- NoSave tidak ikut Init, jadi callback langsung dijalankan sekali dari nilai awal
+        safeCall(context, callback, resolveInput(initial))
+    end
+
+    return {
+        frame = frame,
+        set = commit,
+        get = function() return resolveInput(textBox.Text) end,
+    }
+end
+
+-- =============================== BUTTON ===============================
+function Library:CreateButton(parent, label, callback)
+    local frame = new("Frame", { Parent = parent, ZIndex = 8, Size = u2(1, 0, 0, 28), BackgroundTransparency = 1 })
+    local button = new("TextButton", {
+        Parent = frame, ZIndex = 9, Text = label, TextSize = FONT.normal, AutoButtonColor = true,
+        Size = u2(1, 0, 1, 0), BackgroundColor3 = colors.bg3, BackgroundTransparency = PANEL_T,
+    }, { corner(5) })
+    local busy = false
+    button.MouseButton1Click:Connect(function()
+        if busy then return end
+        busy = true
+        task.spawn(safeCall, "button '" .. tostring(label) .. "'", callback)
+        task.delay(0.1, function() busy = false end)
+    end)
+    return frame
+end
+
+-- ============================= PARAGRAPH ==============================
+function Library:CreateParagraph(parent, config)
+    local GAP, PADDING_V = 6, 20
+    local frame = new("Frame", {
+        Parent = parent, ZIndex = 7, Size = u2(1, 0, 0, PADDING_V),
+        BackgroundColor3 = colors.bg2, BackgroundTransparency = 0.5,
+    }, {
+        corner(5), stroke(nil, 0.65),
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+            PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+        }),
+        new("UIListLayout", { Padding = UDim.new(0, GAP), SortOrder = Enum.SortOrder.LayoutOrder }),
+    })
+    local function makeLabel(order, font, size, color, minHeight)
+        return new("TextLabel", {
+            Parent = frame, ZIndex = 8, LayoutOrder = order, Font = font, TextSize = size, TextColor3 = color,
+            TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, RichText = config.RichText ~= false,
+            Size = u2(1, 0, 0, minHeight),
+        })
+    end
+    local titleLabel = makeLabel(1, BOLD, FONT.normal, colors.primary, 14)
+    local contentLabel = makeLabel(2, MEDIUM, FONT.small, colors.textDim, 12)
+    local minHeights = { [titleLabel] = 14, [contentLabel] = 12 }
+
+    -- tinggi mengikuti TextBounds (akurat untuk RichText), dihitung maksimal sekali per frame
+    local pending = false
+    local function reflow()
+        if pending then return end
+        pending = true
+        task.defer(function()
+            pending = false
+            if not frame.Parent then return end
+            local total, shown = PADDING_V, 0
+            for _, lbl in ipairs({ titleLabel, contentLabel }) do
+                if lbl.Visible then
+                    local h = math.max(lbl.TextBounds.Y, minHeights[lbl])
+                    lbl.Size = u2(1, 0, 0, h)
+                    total = total + h
+                    shown = shown + 1
+                end
+            end
+            frame.Size = u2(1, 0, 0, total + math.max(0, shown - 1) * GAP)
+        end)
+    end
+    local function setText(lbl, text)
+        lbl.Text = formatRichText(text)
+        lbl.Visible = lbl.Text ~= ""
+        reflow()
+    end
+    titleLabel:GetPropertyChangedSignal("TextBounds"):Connect(reflow)
+    contentLabel:GetPropertyChangedSignal("TextBounds"):Connect(reflow)
+    setText(titleLabel, config.Title)
+    setText(contentLabel, config.Content)
+
+    return {
+        _frame = frame,
+        _titleLabel = titleLabel,
+        _contentLabel = contentLabel,
+        SetTitle = function(_, text) setText(titleLabel, text) end,
+        SetContent = function(_, text) setText(contentLabel, text) end,
+        GetTitle = function() return titleLabel.Text end,
+        GetContent = function() return contentLabel.Text end,
+    }
+end
+
+-- ================================ INIT ================================
+function Library:Init()
+    self:Initialize()
+end
+
+function Library:Initialize()
+    if self._initialized then return end
+    self._initialized = true
+    cancelThread(self._initWatchdog)
+    self._initWatchdog = nil
+    -- Config tab dibuat dulu supaya komponennya terdaftar sebelum callback diaktifkan.
+    if self._pendingWindow then
+        safeCall("Config tab", self._createConfigTab, self, self._pendingWindow)
+        self._pendingWindow = nil
+    end
+    executeConfigCallbacks()
+    self:AddConnection("playerRemoving", Players.PlayerRemoving:Connect(function(player)
+        if player ~= localPlayer then return end
+        cancelThread(saveThread)
+        saveThread = nil
+        isDirty = false
+        Config.Save()
+    end))
+end
+
+-- =============================== NOTIFY ===============================
+-- Dirancang praktis tanpa beban (aman di device kentang & Roblox split/multi-client):
+-- - Kartu dibuat SEKALI lalu dipakai ulang, di ScreenGui sendiri (tidak me-render ulang window).
+-- - Tanpa animasi/tween dan tanpa loop per frame; timer = satu task.delay yang hanya
+--   dijadwalkan ulang saat ada event (tampil, hover, antrian bertambah).
+-- Perilaku: tampil BERGANTIAN (sisanya antri, badge +N), timer dipercepat saat antrian berisi,
+-- notifikasi identik tidak diduplikasi, hover menjeda timer (PC), tombol × menutup kartu.
+local NOTIFY = {
+    WIDTH = isMobile and 220 or 250, MARGIN = 14, MAX_QUEUE = 10,
+    TEXT_X = 19, PAD_R = 10, PAD_Y = 8, TITLE_H = 14,
+    GAP = 0.1,         -- jeda antar kartu (detik)
+    FAST_RATE = 1.6,   -- kecepatan timer saat antrian berisi
+}
+NOTIFY.TEXT_W = NOTIFY.WIDTH - NOTIFY.TEXT_X - NOTIFY.PAD_R
+
+function Library:MakeNotify(config)
+    config = config or {}
+    if not self._gui then return end
+    local item = {
+        title   = tostring(config.Title or "Notification"),
+        desc    = tostring(config.Description or ""),
+        content = tostring(config.Content or ""),
+        color   = typeof(config.Color) == "Color3" and config.Color or colors.primary,
+        delay   = math.max(tonumber(config.Delay) or 3, 1),
+    }
+    item.key = item.title .. "\0" .. item.desc .. "\0" .. item.content
+    self._notifQueue = self._notifQueue or {}
+    local queue, current = self._notifQueue, self._notifCurrent
+    if current and current.key == item.key then
+        -- notifikasi identik sedang tampil: cukup ulang timernya
+        current.remaining, current.tick = current.total, os.clock()
+        return self:_scheduleNotify()
+    end
+    local last = queue[#queue]
+    if last and last.key == item.key then return end
+    if #queue >= NOTIFY.MAX_QUEUE then table.remove(queue, 1) end
+    queue[#queue + 1] = item
+    if current then
+        self:_scheduleNotify()   -- perbarui badge +N & percepat timer kartu aktif
+    else
+        self:_showNextNotify()
+    end
+end
+
+function Library:_resetNotify()
+    self._notifGen = (self._notifGen or 0) + 1
+    if self._notifQueue then table.clear(self._notifQueue) end
+    local state, ui = self._notifCurrent, self._notifUI
+    self._notifCurrent, self._notifUI = nil, nil
+    if state then cancelThread(state.timer) end
+    if ui and ui.gui.Parent then pcall(function() ui.gui:Destroy() end) end
+end
+
+function Library:_getNotifyUI()
+    local ui = self._notifUI
+    if ui and ui.gui.Parent then return ui end
+    if not self._gui then return nil end
+    local guiName = self._gui.Name .. "_Notify"
+    local stale = CoreGui:FindFirstChild(guiName)
+    if stale then stale:Destroy() end
+
+    local midY = NOTIFY.PAD_Y + NOTIFY.TITLE_H / 2
+    ui = { hovered = false }
+    ui.gui = new("ScreenGui", {
+        Name = guiName, Parent = CoreGui, IgnoreGuiInset = true, ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 2147483647,
+    })
+    -- latar & transparansi sama persis dengan Main Window
+    ui.card = new("Frame", {
+        Parent = ui.gui, Name = "Card", Active = true, Visible = false, AnchorPoint = v2(1, 1),
+        Size = u2(0, NOTIFY.WIDTH, 0, 30), Position = u2(1, -NOTIFY.MARGIN, 1, -NOTIFY.MARGIN),
+        BackgroundColor3 = colors.bg1, BackgroundTransparency = PANEL_T,
+    }, { corner(7) })
+    ui.bar = new("Frame", {
+        Parent = ui.card, ZIndex = 2, AnchorPoint = v2(0, 0.5), Size = u2(0, 3, 1, -16), Position = u2(0, 8, 0.5, 0),
+        BackgroundColor3 = colors.primary,
+    }, { corner() })
+    ui.title = new("TextLabel", {
+        Parent = ui.card, ZIndex = 2, TextSize = FONT.normal, TextTruncate = Enum.TextTruncate.AtEnd,
+        Size = u2(0, NOTIFY.TEXT_W - 36, 0, NOTIFY.TITLE_H), Position = u2(0, NOTIFY.TEXT_X, 0, NOTIFY.PAD_Y),
+    })
+    local function bodyLabel(font, color)
+        return new("TextLabel", {
+            Parent = ui.card, ZIndex = 2, Visible = false, Font = font, TextColor3 = color,
+            TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+        })
+    end
+    ui.desc = bodyLabel(MEDIUM, colors.textDim)
+    ui.content = bodyLabel(REGULAR, colors.textDimmer)
+    ui.queueLabel = new("TextLabel", {
+        Parent = ui.card, ZIndex = 2, Visible = false, TextSize = 9, TextColor3 = colors.textDimmer,
+        TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = v2(1, 0.5),
+        Size = u2(0, 20, 0, NOTIFY.TITLE_H), Position = u2(1, -26, 0, midY),
+    })
+    ui.closeBtn = new("TextButton", {
+        Parent = ui.card, ZIndex = 3, Text = "×", TextSize = 14, TextColor3 = colors.textDimmer,
+        AnchorPoint = v2(1, 0.5), Size = u2(0, 18, 0, 18), Position = u2(1, -6, 0, midY),
+    })
+
+    ui.card.MouseEnter:Connect(function()
+        -- di perangkat sentuh MouseLeave tidak selalu terpicu, jadi jeda hanya untuk PC
+        if isMobile then return end
+        ui.hovered = true
+        self:_scheduleNotify()
+    end)
+    ui.card.MouseLeave:Connect(function()
+        if not ui.hovered then return end
+        ui.hovered = false
+        self:_scheduleNotify()
+    end)
+    ui.closeBtn.MouseButton1Click:Connect(function() self:_hideNotify() end)
+    ui.closeBtn.MouseEnter:Connect(function() ui.closeBtn.TextColor3 = colors.text end)
+    ui.closeBtn.MouseLeave:Connect(function() ui.closeBtn.TextColor3 = colors.textDimmer end)
+    ui.gui.Destroying:Connect(function()
+        if self._notifUI == ui then self:_resetNotify() end
+    end)
+    self._notifUI = ui
+    return ui
+end
+
+function Library:_showNextNotify()
+    local queue = self._notifQueue
+    if self._notifCurrent or not queue or #queue == 0 then return end
+    local ui = self:_getNotifyUI()
+    if not ui then return table.clear(queue) end
+
+    local item = table.remove(queue, 1)
+    local y = NOTIFY.PAD_Y + NOTIFY.TITLE_H
+    local function placeBody(lbl, text, font)
+        local h = textHeight(text, FONT.small, font, NOTIFY.TEXT_W)
+        lbl.Visible = h > 0
+        if h == 0 then return end
+        lbl.Text = text
+        lbl.Size = u2(0, NOTIFY.TEXT_W, 0, h)
+        lbl.Position = u2(0, NOTIFY.TEXT_X, 0, y + 2)
+        y = y + 2 + h
+    end
+    ui.title.Text = item.title
+    ui.bar.BackgroundColor3 = item.color
+    placeBody(ui.desc, item.desc, MEDIUM)
+    placeBody(ui.content, item.content, REGULAR)
+    ui.card.Size = u2(0, NOTIFY.WIDTH, 0, y + NOTIFY.PAD_Y)
+    ui.queueLabel.Visible = false
+    ui.hovered = false
+    ui.closeBtn.TextColor3 = colors.textDimmer
+
+    self._notifCurrent = { key = item.key, total = item.delay, remaining = item.delay, rate = 0, tick = os.clock() }
+    ui.card.Visible = true
+    self:_scheduleNotify()
+end
+
+-- Sinkronkan sisa waktu lalu jadwalkan ulang satu timer (hanya saat ada event, bukan per frame).
+function Library:_scheduleNotify()
+    local state, ui = self._notifCurrent, self._notifUI
+    if not state or not ui then return end
+    local now = os.clock()
+    state.remaining = state.remaining - (now - state.tick) * state.rate
+    state.tick = now
+    cancelThread(state.timer)
+    state.timer = nil
+
+    local pending = self._notifQueue and #self._notifQueue or 0
+    ui.queueLabel.Text = "+" .. pending
+    ui.queueLabel.Visible = pending > 0
+    if state.remaining <= 0 then return self:_hideNotify() end
+
+    state.rate = ui.hovered and 0 or (pending > 0 and NOTIFY.FAST_RATE or 1)
+    if state.rate == 0 then return end
+    state.timer = task.delay(state.remaining / state.rate, function()
+        state.timer = nil
+        if self._notifCurrent == state then self:_hideNotify() end
+    end)
+end
+
+function Library:_hideNotify()
+    local state = self._notifCurrent
+    if not state then return end
+    self._notifCurrent = nil
+    cancelThread(state.timer)
+    local ui = self._notifUI
+    if ui and ui.gui.Parent then ui.card.Visible = false end
+    -- jeda singkat supaya pergantian ke kartu berikutnya tetap terlihat
+    local gen = self._notifGen
+    task.delay(NOTIFY.GAP, function()
+        if self._notifGen == gen then self:_showNextNotify() end
+    end)
+end
+
+-- ============================= CONFIG TAB =============================
+-- Tombol dua langkah: klik pertama minta konfirmasi (3 detik), klik kedua menjalankan aksi.
+local function addConfirmButton(section, title, confirmColor, onConfirm)
+    local frame, timeout
+    local function restore()
+        cancelThread(timeout)
+        timeout = nil
+        local button = frame:FindFirstChildWhichIsA("TextButton")
+        button.Text, button.BackgroundColor3 = title, colors.bg3
+    end
+    frame = section:AddButton({
+        Title = title,
+        Callback = function()
+            if timeout then
+                restore()
+                return onConfirm()
+            end
+            local button = frame:FindFirstChildWhichIsA("TextButton")
+            button.Text, button.BackgroundColor3 = "Klik lagi untuk konfirmasi!", confirmColor
+            timeout = task.delay(3, function()
+                timeout = nil
+                restore()
+            end)
+        end,
+    })
+end
+
+function Library:_createConfigTab(window)
+    local tab = window:AddTab({ Name = "Config", Icon = "loop" })
+
+    tab:AddSection("Auto Save"):AddToggle({
+        Title = "Auto Save Config",
+        Default = true,
+        NoSave = true,
+        Callback = function(on)
+            _G.AutoSaveEnabled = on
+            self:MakeNotify({ Title = "Auto Save", Description = on and "Auto Save diaktifkan" or "Auto Save dinonaktifkan", Delay = 2 })
+        end,
+    })
+
+    local section = tab:AddSection("Config Management")
+    section:AddButton({
+        Title = "Save Config Now",
+        Callback = function()
+            local ok = Config.Save()
+            self:MakeNotify({
+                Title = "Config",
+                Description = ok and "Config berhasil disimpan!" or "Gagal menyimpan config.",
+                Color = ok and colors.success or colors.danger,
+                Delay = 2,
+            })
+        end,
+    })
+    addConfirmButton(section, "Reset to Default", rgb(255, 100, 0), function()
+        Config.Reset()
+        executeConfigCallbacks()
+        self:MakeNotify({ Title = "Config", Description = "Semua settingan direset ke default!", Color = colors.danger })
+    end)
+    section:AddParagraph({
+        Title = "⚠️ Perhatian",
+        Content = "Setelah melakukan Reset to Default, beberapa settingan seperti Toggle dan nilai Input akan langsung ter-update di UI.\n\n"
+            .. "Namun untuk settingan yang mempengaruhi karakter, kecepatan, atau fitur aktif lainnya — kamu perlu Rejoin / Respawn agar perubahan berlaku sepenuhnya.\n\n"
+            .. "File config disimpan otomatis setiap 2 detik jika Auto Save aktif. Pastikan Auto Save ON sebelum keluar game agar settinganmu tidak hilang.",
+    })
+    addConfirmButton(section, "Delete Config File", rgb(200, 30, 30), function()
+        Config.Delete()
+        self:MakeNotify({ Title = "Config", Description = "File config telah dihapus.", Color = colors.danger, Delay = 2 })
+    end)
+end
+
+-- ============================= PUBLIC API =============================
+local ICONS = {
+    player    = "rbxassetid://12120698352",
+    web       = "rbxassetid://137601480983962",
+    bag       = "rbxassetid://8601111810",
+    shop      = "rbxassetid://4985385964",
+    cart      = "rbxassetid://128874923961846",
+    plug      = "rbxassetid://137601480983962",
+    settings  = "rbxassetid://70386228443175",
+    loop      = "rbxassetid://122032243989747",
+    gps       = "rbxassetid://78381660144034",
+    compas    = "rbxassetid://125300760963399",
+    gamepad   = "rbxassetid://84173963561612",
+    boss      = "rbxassetid://13132186360",
+    scroll    = "rbxassetid://114127804740858",
+    menu      = "rbxassetid://6340513838",
+    crosshair = "rbxassetid://12614416478",
+    user      = "rbxassetid://108483430622128",
+    stat      = "rbxassetid://12094445329",
+    eyes      = "rbxassetid://14321059114",
+    sword     = "rbxassetid://82472368671405",
+    discord   = "rbxassetid://94434236999817",
+    star      = "rbxassetid://107005941750079",
+    skeleton  = "rbxassetid://17313330026",
+    payment   = "rbxassetid://18747025078",
+    scan      = "rbxassetid://109869955247116",
+    alert     = "rbxassetid://73186275216515",
+    question  = "rbxassetid://17510196486",
+    idea      = "rbxassetid://16833255748",
+    strom     = "rbxassetid://13321880293",
+    water     = "rbxassetid://100076212630732",
+    dcs       = "rbxassetid://15310731934",
+    start     = "rbxassetid://108886429866687",
+    next      = "rbxassetid://12662718374",
+    rod       = "rbxassetid://103247953194129",
+    fish      = "rbxassetid://97167558235554",
+    send      = "rbxassetid://122775063389583",
+    home      = "rbxassetid://86450224791749",
+}
+
+local function createSection(lib, page, tabName, sectionTitle, isOpen)
+    local container, expand = lib:CreateCategory(page, sectionTitle, isOpen)
+    local Section = { _container = container, _library = lib, _layoutOrder = 0 }
+
+    -- Pasang urutan tampil; komponen dengan nama ikut didaftarkan ke search bar.
+    local function place(frame, name)
+        Section._layoutOrder = Section._layoutOrder + 1
+        frame.LayoutOrder = Section._layoutOrder
+        if name then
+            table.insert(lib._searchIndex, {
+                name = tostring(name), lname = tostring(name):lower(), frame = frame,
+                pageName = tabName, sectionTitle = sectionTitle, expand = expand,
+            })
+        end
+    end
+
+    function Section:AddToggle(cfg)
+        cfg = cfg or {}
+        local title, callback = cfg.Title or "Toggle", cfg.Callback
+        local path = not cfg.NoSave and ("Toggles." .. toKey(title)) or nil
+        local toggle = lib:CreateToggle(container, title, path, callback, cfg.NoSave, cfg.Default or false)
+        place(toggle.frame, title)
+        return {
+            SetValue = function(_, value)
+                toggle.set(value)
+                safeCall("toggle '" .. tostring(title) .. "'", callback, toggle.get())
+            end,
+            GetValue = function() return toggle.get() end,
+        }
+    end
+
+    function Section:AddDropdown(cfg)
+        cfg = cfg or {}
+        local title, options = cfg.Title or "Dropdown", cfg.Options or {}
+        local id = toKey(title)
+        local path = not cfg.NoSave and ((cfg.Multi and "MultiDropdowns." or "Dropdowns.") .. id) or nil
+        local frame = lib:_createBaseDropdown(container, title, nil, options, path, cfg.Callback, id, cfg.Default, cfg.Multi == true)
+        place(frame, title)
+        local dropdown = lib.flags[id]
+        return {
+            _options = options,
+            Value = dropdown:GetValue(),
+            SetOptions = function(self, list)
+                self._options = list
+                dropdown:Refresh(list)
+            end,
+            GetOptions = function(self) return self._options end,
+            SetValue = function(self, value)
+                dropdown:SetValue(value)
+                self.Value = dropdown:GetValue()
+            end,
+            GetValue = function() return dropdown:GetValue() end,
+        }
+    end
+
+    function Section:AddInput(cfg)
+        cfg = cfg or {}
+        local title = cfg.Title or "Input"
+        local path = not cfg.NoSave and ("Inputs." .. toKey(title)) or nil
+        local input = lib:CreateInput(container, title, path, cfg.Default or "", cfg.Callback, cfg.Placeholder)
+        place(input.frame, title)
+        return {
+            _frame = input.frame,
+            SetValue = function(_, value) input.set(value) end,
+            GetValue = function() return input.get() end,
+        }
+    end
+
+    function Section:AddButton(cfg)
+        cfg = cfg or {}
+        local title = cfg.Title or "Button"
+        local frame = lib:CreateButton(container, title, cfg.Callback)
+        place(frame, title)
+        return frame
+    end
+
+    function Section:AddParagraph(cfg)
+        local paragraph = lib:CreateParagraph(container, cfg or {})
+        place(paragraph._frame)
+        return paragraph
+    end
+
+    return Section
+end
+
+function Library:Window(config)
+    config = config or {}
+    self:CreateWindow({ Name = "LynxGui", Title = config.Title or "LynX", Subtitle = config.Footer or "" })
+    Config.Load()
+
+    local lib = self
+    local Window = { _library = lib, _tabs = {}, _tabOrder = 0 }
+    lib._pendingWindow = Window
+    -- ingatkan kalau lupa memanggil Library:Init() di baris paling bawah script
+    lib._initWatchdog = task.delay(6, function()
+        lib._initWatchdog = nil
+        if not lib._initialized then
+            warn("[LynxGUI] Library:Init() belum dipanggil. Tambahkan 'Library:Init()' di baris paling bawah script supaya fitur yang ON dari config benar-benar berjalan.")
+        end
+    end)
+
+    function Window:AddTab(tabConfig)
+        tabConfig = tabConfig or {}
+        local tabName = tostring(tabConfig.Name or "Tab")
+        local icon = type(tabConfig.Icon) == "string" and ICONS[tabConfig.Icon:lower()] or ""
+        self._tabOrder = self._tabOrder + 1
+        local page = lib:CreatePage(tabName, tabName, icon, self._tabOrder)
+        local Tab = { _page = page, _library = lib, _sections = {} }
+
+        function Tab:AddSection(sectionTitle, isOpen)
+            local section = createSection(lib, page, tabName, tostring(sectionTitle or "Section"), isOpen)
+            table.insert(self._sections, section)
+            return section
+        end
+
+        if self._tabOrder == 1 then lib:SetFirstPage(tabName) end
+        table.insert(self._tabs, Tab)
+        return Tab
+    end
+
+    return Window
+end
+
+return Library
