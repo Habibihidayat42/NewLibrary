@@ -429,6 +429,13 @@ end
 -- dilepas. Koneksi UserInputService HANYA hidup selama drag berlangsung (tanpa beban idle).
 local DRAG_THRESHOLD = isMobile and 12 or 6   -- geser di bawah ini tetap dihitung "tap"
 
+-- Posisi GuiObject dalam pixel relatif ke ScreenGui-nya. JANGAN pakai AbsolutePosition untuk ini:
+-- nilainya tidak menghitung GUI inset (topbar), jadi dengan IgnoreGuiInset window melompat ke atas.
+local function pixelPosition(guiObject, screen)
+    local p = guiObject.Position
+    return v2(p.X.Scale * screen.X + p.X.Offset, p.Y.Scale * screen.Y + p.Y.Offset)
+end
+
 local function trackDrag(handle, onStart, onMove, onEnd)
     local dragging = false
     handle.InputBegan:Connect(function(input)
@@ -606,7 +613,7 @@ function Library:CreateWindow(config)
 
     -- drag window lewat header; sebagian header selalu tersisa di layar supaya bisa digeser balik
     local dragStart
-    trackDrag(header, function() dragStart = win.AbsolutePosition end, function(delta)
+    trackDrag(header, function() dragStart = pixelPosition(win, gui.AbsoluteSize) end, function(delta)
         local screen, size = gui.AbsoluteSize, win.AbsoluteSize
         local x = math.clamp(dragStart.X + delta.X, 80 - size.X, math.max(80 - size.X, screen.X - 80))
         local y = math.clamp(dragStart.Y + delta.Y, 0, math.max(0, screen.Y - HEADER_H))
@@ -642,7 +649,7 @@ function Library:CreateWindow(config)
             BackgroundColor3 = colors.bg2, Image = "rbxassetid://118176705805619", ScaleType = Enum.ScaleType.Fit,
         }, { corner(6) })
         local iconStart
-        trackDrag(icon, function() iconStart = icon.AbsolutePosition end, function(delta)
+        trackDrag(icon, function() iconStart = pixelPosition(icon, gui.AbsoluteSize) end, function(delta)
             local screen = gui.AbsoluteSize
             icon.Position = u2(
                 0, math.clamp(iconStart.X + delta.X, 0, math.max(0, screen.X - 40)),
