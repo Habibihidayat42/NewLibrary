@@ -353,7 +353,6 @@ function Library:CreateWindow(config)
     local name = config.Name or "LynxGUI"
     local title = config.Title or "LynX"
     local subtitle = config.Subtitle or ""
-    self._windowTitle = title
     table.clear(CallbackRegistry)
     table.clear(self.flags)
     table.clear(self.pages)
@@ -2312,24 +2311,21 @@ end
 -- Perilaku: tampil BERGANTIAN (satu kartu, sisanya antri), timer dipercepat saat antrian
 -- berisi, notifikasi identik tidak diduplikasi, hover menjeda timer (PC), ✕ menutup kartu.
 local NOTIFY = {
-    WIDTH     = isMobile and 230 or 260,
+    WIDTH     = isMobile and 220 or 250,
     MARGIN    = 14,
     MAX_QUEUE = 10,
-    PAD       = 12,
-    BODY_X    = 12,
-    HEADER_Y  = 9,
-    HEADER_H  = 16,
+    TEXT_X    = 19,    -- bar aksen (x=8, lebar 3) + jarak
+    PAD_R     = 10,
+    PAD_Y     = 8,
+    TITLE_H   = 14,
     GAP       = 0.1,   -- jeda antar kartu (detik)
     FAST_RATE = 1.6,   -- kecepatan timer saat antrian berisi
 }
-NOTIFY.BODY_W     = NOTIFY.WIDTH - NOTIFY.BODY_X - NOTIFY.PAD
-NOTIFY.POS        = UDim2.new(1, -NOTIFY.MARGIN, 1, -NOTIFY.MARGIN)
+NOTIFY.TEXT_W = NOTIFY.WIDTH - NOTIFY.TEXT_X - NOTIFY.PAD_R
+NOTIFY.POS    = UDim2.new(1, -NOTIFY.MARGIN, 1, -NOTIFY.MARGIN)
 local function measureTextHeight(text, size, font, width)
     if text == "" then return 0 end
     return math.ceil(TextService:GetTextSize(text, size, font, Vector2.new(width, 10000)).Y)
-end
-local function measureTextWidth(text, size, font)
-    return math.ceil(TextService:GetTextSize(text, size, font, Vector2.new(10000, 100)).X)
 end
 function Library:MakeNotify(config)
     config = config or {}
@@ -2383,9 +2379,10 @@ function Library:_getNotifyUI()
     local guiName = self._gui.Name .. "_Notify"
     local stale = CoreGui:FindFirstChild(guiName)
     if stale then stale:Destroy() end
-    local W, PAD, BODY_X, BODY_W = NOTIFY.WIDTH, NOTIFY.PAD, NOTIFY.BODY_X, NOTIFY.BODY_W
-    local HY, HH = NOTIFY.HEADER_Y, NOTIFY.HEADER_H
-    ui = {hovered = false, accent = colors.primary}
+    local TEXT_X, TEXT_W = NOTIFY.TEXT_X, NOTIFY.TEXT_W
+    local PAD_Y, TITLE_H = NOTIFY.PAD_Y, NOTIFY.TITLE_H
+    local titleMidY = PAD_Y + TITLE_H / 2
+    ui = {hovered = false}
     ui.gui = new("ScreenGui", {
         Name = guiName,
         Parent = CoreGui,
@@ -2394,11 +2391,13 @@ function Library:_getNotifyUI()
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         DisplayOrder = 2147483647
     })
+    -- Kartu minimal: latar & transparansi sama persis dengan Main Window (bg1 + panelTransparency),
+    -- tanpa stroke/gradient/overlay. Total cuma 9 instance di dalam ScreenGui.
     local card = new("Frame", {
         Parent = ui.gui,
         Name = "Card",
         AnchorPoint = Vector2.new(1, 1),
-        Size = UDim2.new(0, W, 0, 60),
+        Size = UDim2.new(0, NOTIFY.WIDTH, 0, 30),
         Position = NOTIFY.POS,
         BackgroundColor3 = colors.bg1,
         BackgroundTransparency = panelTransparency,
@@ -2409,177 +2408,102 @@ function Library:_getNotifyUI()
     })
     ui.card = card
     new("UICorner", {Parent = card, CornerRadius = UDim.new(0, 7)})
-    ui.stroke = new("UIStroke", {Parent = card, Color = colors.border, Thickness = 1, Transparency = 0.35})
-    -- rona tipis warna aksen dari sisi kiri
-    ui.glow = new("Frame", {
+    -- bar aksen vertikal (gaya indikator tab aktif); tingginya ikut kartu lewat Scale
+    ui.bar = new("Frame", {
         Parent = card,
-        Size = UDim2.new(1, 0, 1, 0),
+        AnchorPoint = Vector2.new(0, 0.5),
+        Size = UDim2.new(0, 3, 1, -16),
+        Position = UDim2.new(0, 8, 0.5, 0),
         BackgroundColor3 = colors.primary,
         BorderSizePixel = 0,
         ZIndex = 2
     })
-    new("UICorner", {Parent = ui.glow, CornerRadius = UDim.new(0, 7)})
-    new("UIGradient", {
-        Parent = ui.glow,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.8),
-            NumberSequenceKeypoint.new(0.3, 0.94),
-            NumberSequenceKeypoint.new(1, 1)
-        })
-    })
-    -- header ala Main Window: Judul │ Brand ............ +N  ✕
+    new("UICorner", {Parent = ui.bar, CornerRadius = UDim.new(1, 0)})
     ui.title = new("TextLabel", {
         Parent = card,
         Text = "",
-        Size = UDim2.new(0, 40, 0, HH),
-        Position = UDim2.new(0, BODY_X, 0, HY),
+        Size = UDim2.new(0, TEXT_W - 36, 0, TITLE_H),
+        Position = UDim2.new(0, TEXT_X, 0, PAD_Y),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold,
         TextSize = fontSize.normal,
-        TextColor3 = colors.primary,
+        TextColor3 = colors.text,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
-        ZIndex = 5
-    })
-    ui.sep = new("Frame", {
-        Parent = card,
-        Size = UDim2.new(0, 1, 0, 12),
-        Position = UDim2.new(0, BODY_X, 0, HY + 2),
-        BackgroundColor3 = colors.primary,
-        BackgroundTransparency = 0.45,
-        BorderSizePixel = 0,
-        ZIndex = 5
-    })
-    new("UIGradient", {
-        Parent = ui.sep,
-        Rotation = 90,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1),
-            NumberSequenceKeypoint.new(0.5, 0),
-            NumberSequenceKeypoint.new(1, 1)
-        })
-    })
-    local brand = self._windowTitle or "LynX"
-    ui.brandW = math.min(measureTextWidth(brand, fontSize.small, Enum.Font.GothamBold) + 2, 70)
-    ui.brand = new("TextLabel", {
-        Parent = card,
-        Text = brand,
-        Size = UDim2.new(0, ui.brandW, 0, HH),
-        Position = UDim2.new(0, BODY_X, 0, HY),
-        BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold,
-        TextSize = fontSize.small,
-        TextColor3 = colors.textDimmer,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd,
-        ZIndex = 5
-    })
-    ui.queuePill = new("TextLabel", {
-        Parent = card,
-        AnchorPoint = Vector2.new(1, 0.5),
-        Size = UDim2.new(0, 22, 0, 14),
-        Position = UDim2.new(1, -(PAD + 20), 0, HY + HH / 2),
-        BackgroundColor3 = colors.bg3,
-        BackgroundTransparency = sectionTransparency,
-        BorderSizePixel = 0,
-        Text = "",
-        Font = Enum.Font.GothamBold,
-        TextSize = 9,
-        TextColor3 = colors.textDim,
-        Visible = false,
-        ZIndex = 5
-    })
-    new("UICorner", {Parent = ui.queuePill, CornerRadius = UDim.new(1, 0)})
-    new("UIStroke", {Parent = ui.queuePill, Color = colors.border, Thickness = 1, Transparency = 0.4})
-    local closeBtn = new("TextButton", {
-        Parent = card,
-        Size = UDim2.new(0, 22, 0, 22),
-        Position = UDim2.new(1, -(PAD + 17), 0, HY + HH / 2 - 11),
-        BackgroundTransparency = 1,
-        Text = "",
-        AutoButtonColor = false,
-        ZIndex = 6
-    })
-    ui.closeLines = {}
-    for _, rot in ipairs({45, -45}) do
-        ui.closeLines[#ui.closeLines + 1] = new("Frame", {
-            Parent = closeBtn,
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, 0, 0.5, 0),
-            Size = UDim2.new(0, 9, 0, 1.6),
-            Rotation = rot,
-            BackgroundColor3 = colors.textDimmer,
-            BorderSizePixel = 0,
-            ZIndex = 7
-        })
-    end
-    local function setCloseColor(c)
-        for _, line in ipairs(ui.closeLines) do
-            line.BackgroundColor3 = c
-        end
-    end
-    ui.divider = new("Frame", {
-        Parent = card,
-        Size = UDim2.new(0, BODY_W, 0, 1),
-        Position = UDim2.new(0, BODY_X, 0, HY + HH + 3),
-        BackgroundColor3 = colors.border,
-        BackgroundTransparency = 0.3,
-        BorderSizePixel = 0,
-        ZIndex = 5
-    })
-    new("UIGradient", {
-        Parent = ui.divider,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0),
-            NumberSequenceKeypoint.new(1, 1)
-        })
+        ZIndex = 2
     })
     ui.desc = new("TextLabel", {
         Parent = card,
         Text = "",
-        Size = UDim2.new(0, BODY_W, 0, 12),
-        Position = UDim2.new(0, BODY_X, 0, HY + HH + 8),
+        Size = UDim2.new(0, TEXT_W, 0, 12),
+        Position = UDim2.new(0, TEXT_X, 0, PAD_Y + TITLE_H + 2),
         BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold,
-        TextSize = fontSize.small,
-        TextColor3 = colors.text,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top,
-        TextWrapped = true,
-        Visible = false,
-        ZIndex = 5
-    })
-    ui.content = new("TextLabel", {
-        Parent = card,
-        Text = "",
-        Size = UDim2.new(0, BODY_W, 0, 12),
-        Position = UDim2.new(0, BODY_X, 0, HY + HH + 8),
-        BackgroundTransparency = 1,
-        Font = Enum.Font.Gotham,
+        Font = Enum.Font.GothamMedium,
         TextSize = fontSize.small,
         TextColor3 = colors.textDim,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true,
         Visible = false,
-        ZIndex = 5
+        ZIndex = 2
     })
+    ui.content = new("TextLabel", {
+        Parent = card,
+        Text = "",
+        Size = UDim2.new(0, TEXT_W, 0, 12),
+        Position = UDim2.new(0, TEXT_X, 0, PAD_Y + TITLE_H + 2),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        TextSize = fontSize.small,
+        TextColor3 = colors.textDimmer,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true,
+        Visible = false,
+        ZIndex = 2
+    })
+    ui.queueLabel = new("TextLabel", {
+        Parent = card,
+        AnchorPoint = Vector2.new(1, 0.5),
+        Size = UDim2.new(0, 20, 0, TITLE_H),
+        Position = UDim2.new(1, -26, 0, titleMidY),
+        BackgroundTransparency = 1,
+        Text = "",
+        Font = Enum.Font.GothamBold,
+        TextSize = 9,
+        TextColor3 = colors.textDimmer,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Visible = false,
+        ZIndex = 2
+    })
+    local closeBtn = new("TextButton", {
+        Parent = card,
+        AnchorPoint = Vector2.new(1, 0.5),
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = UDim2.new(1, -6, 0, titleMidY),
+        BackgroundTransparency = 1,
+        Text = "×",
+        Font = Enum.Font.GothamBold,
+        TextSize = 14,
+        TextColor3 = colors.textDimmer,
+        AutoButtonColor = false,
+        ZIndex = 3
+    })
+    ui.closeBtn = closeBtn
     card.MouseEnter:Connect(function()
         -- di perangkat sentuh MouseLeave tidak selalu terpicu, jadi jeda hanya untuk PC
         if isMobile then return end
         ui.hovered = true
-        ui.stroke.Color = ui.accent
         self:_scheduleNotify()
     end)
     card.MouseLeave:Connect(function()
         if not ui.hovered then return end
         ui.hovered = false
-        ui.stroke.Color = colors.border
         self:_scheduleNotify()
     end)
     closeBtn.MouseButton1Click:Connect(function() self:_hideNotify() end)
-    closeBtn.MouseEnter:Connect(function() setCloseColor(ui.accent) end)
-    closeBtn.MouseLeave:Connect(function() setCloseColor(colors.textDimmer) end)
+    closeBtn.MouseEnter:Connect(function() closeBtn.TextColor3 = colors.text end)
+    closeBtn.MouseLeave:Connect(function() closeBtn.TextColor3 = colors.textDimmer end)
     ui.gui.Destroying:Connect(function()
         if self._notifUI == ui then self:_resetNotify() end
     end)
@@ -2595,48 +2519,35 @@ function Library:_showNextNotify()
         table.clear(queue)
         return
     end
-    local item  = table.remove(queue, 1)
-    local color = item.color
-    local BODY_X, BODY_W = NOTIFY.BODY_X, NOTIFY.BODY_W
-    local HY, HH = NOTIFY.HEADER_Y, NOTIFY.HEADER_H
-    -- ukuran & posisi mengikuti isi teks (dihitung sekali per notifikasi)
-    local titleMaxW = math.max(40, BODY_W - (ui.brandW + 14) - 48)
-    local titleW   = math.min(measureTextWidth(item.title, fontSize.normal, Enum.Font.GothamBold) + 2, titleMaxW)
-    local descH    = measureTextHeight(item.desc, fontSize.small, Enum.Font.GothamBold, BODY_W)
-    local contentH = measureTextHeight(item.content, fontSize.small, Enum.Font.Gotham, BODY_W)
+    local item   = table.remove(queue, 1)
+    local TEXT_X = NOTIFY.TEXT_X
+    local TEXT_W = NOTIFY.TEXT_W
+    -- tinggi kartu mengikuti isi teks (dihitung sekali per notifikasi)
+    local descH    = measureTextHeight(item.desc, fontSize.small, Enum.Font.GothamMedium, TEXT_W)
+    local contentH = measureTextHeight(item.content, fontSize.small, Enum.Font.Gotham, TEXT_W)
     ui.title.Text = item.title
-    ui.title.TextColor3 = color
-    ui.title.Size = UDim2.new(0, titleW, 0, HH)
-    local sepX = BODY_X + titleW + 6
-    ui.sep.Position = UDim2.new(0, sepX, 0, HY + 2)
-    ui.sep.BackgroundColor3 = color
-    ui.brand.Position = UDim2.new(0, sepX + 7, 0, HY)
-    local y = HY + HH + 8
+    ui.bar.BackgroundColor3 = item.color
+    local y = NOTIFY.PAD_Y + NOTIFY.TITLE_H
     ui.desc.Visible = descH > 0
     if descH > 0 then
+        y = y + 2
         ui.desc.Text = item.desc
-        ui.desc.Size = UDim2.new(0, BODY_W, 0, descH)
-        ui.desc.Position = UDim2.new(0, BODY_X, 0, y)
-        y = y + descH + 3
+        ui.desc.Size = UDim2.new(0, TEXT_W, 0, descH)
+        ui.desc.Position = UDim2.new(0, TEXT_X, 0, y)
+        y = y + descH
     end
     ui.content.Visible = contentH > 0
     if contentH > 0 then
+        y = y + 2
         ui.content.Text = item.content
-        ui.content.Size = UDim2.new(0, BODY_W, 0, contentH)
-        ui.content.Position = UDim2.new(0, BODY_X, 0, y)
-        y = y + contentH + 3
+        ui.content.Size = UDim2.new(0, TEXT_W, 0, contentH)
+        ui.content.Position = UDim2.new(0, TEXT_X, 0, y)
+        y = y + contentH
     end
-    local hasBody = descH > 0 or contentH > 0
-    ui.divider.Visible = hasBody
-    ui.card.Size = UDim2.new(0, NOTIFY.WIDTH, 0, hasBody and (y + 7) or (HY + HH + HY))
-    ui.accent = color
-    ui.glow.BackgroundColor3 = color
-    ui.queuePill.Visible = false
+    ui.card.Size = UDim2.new(0, NOTIFY.WIDTH, 0, y + NOTIFY.PAD_Y)
+    ui.queueLabel.Visible = false
     ui.hovered = false
-    ui.stroke.Color = colors.border
-    for _, line in ipairs(ui.closeLines) do
-        line.BackgroundColor3 = colors.textDimmer
-    end
+    ui.closeBtn.TextColor3 = colors.textDimmer
     self._notifCurrent = {
         key       = item.key,
         total     = item.delay,
@@ -2662,8 +2573,8 @@ function Library:_scheduleNotify()
         state.timer = nil
     end
     local pending = self._notifQueue and #self._notifQueue or 0
-    ui.queuePill.Text = "+" .. pending
-    ui.queuePill.Visible = pending > 0
+    ui.queueLabel.Text = "+" .. pending
+    ui.queueLabel.Visible = pending > 0
     if state.remaining <= 0 then
         self:_hideNotify()
         return
