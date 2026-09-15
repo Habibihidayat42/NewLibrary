@@ -116,6 +116,12 @@ local function safeCall(context, fn, ...)
     return ok
 end
 
+-- Callback milik user dijalankan di thread sendiri. Callback yang berisi loop/yield
+-- (mis. `while on do ... task.wait() end`) tidak akan membuat Init/SetValue ikut macet.
+local function fireCallback(context, fn, ...)
+    if fn then task.spawn(safeCall, context, fn, ...) end
+end
+
 local function isPress(input)
     local t = input.UserInputType
     return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
@@ -254,6 +260,7 @@ function Config.Set(path, value)
     if not path then return end
     local keys = {}
     for key in path:gmatch("[^.]+") do keys[#keys + 1] = key end
+    if #keys == 0 then return end
     local target = CurrentConfig
     for i = 1, #keys - 1 do
         if type(target[keys[i]]) ~= "table" then target[keys[i]] = {} end
@@ -277,10 +284,12 @@ function Config.Delete()
     end)
 end
 
+-- Maksimal satu penulisan file per 2 detik. Timer tidak dibuat ulang tiap perubahan, jadi
+-- perubahan beruntun (mis. SaveConfigValue di dalam loop) tetap tersimpan & tidak membebani.
 local function markDirty()
     if _G.AutoSaveEnabled == false then return end
     isDirty = true
-    cancelThread(saveThread)
+    if saveThread then return end
     saveThread = task.delay(2, function()
         saveThread = nil
         if not isDirty then return end
@@ -316,7 +325,7 @@ local function executeConfigCallbacks()
     for _, wantToggle in ipairs({ false, true }) do
         for _, entry in pairs(CallbackRegistry) do
             if entry.callback and (entry.kind == "toggle") == wantToggle then
-                safeCall("callback @" .. entry.path, entry.callback, Config.Get(entry.path, entry.default))
+                fireCallback("callback @" .. entry.path, entry.callback, Config.Get(entry.path, entry.default))
             end
         end
     end
@@ -856,7 +865,7 @@ function Library:CreateToggle(parent, label, configPath, callback, disableSave, 
     button.MouseButton1Click:Connect(function()
         apply(not on)
         saveValue(path, on)
-        safeCall("toggle '" .. tostring(label) .. "'", callback, on)
+        fireCallback("toggle '" .. tostring(label) .. "'", callback, on)
     end)
     registerCallback(path, callback, "toggle", defaultValue or false, apply)
 
@@ -974,9 +983,9 @@ function Library:_createBaseDropdown(parent, title, _imageId, items, configPath,
     local function emit(value)
         if not onSelect then return end
         if isMulti then
-            safeCall("dropdown '" .. tostring(title) .. "'", onSelect, copyValue(value))
+            fireCallback("dropdown '" .. tostring(title) .. "'", onSelect, copyValue(value))
         else
-            safeCall("dropdown '" .. tostring(title) .. "'", onSelect, value ~= nil and tostring(value) or "")
+            fireCallback("dropdown '" .. tostring(title) .. "'", onSelect, value ~= nil and tostring(value) or "")
         end
     end
 
@@ -1257,7 +1266,7 @@ function Library:CreateInput(parent, label, configPath, defaultValue, callback, 
         local value = resolveInput(raw)
         textBox.Text = tostring(value)
         saveValue(configPath, value)
-        safeCall(context, callback, value)
+        fireCallback(context, callback, value)
     end
     textBox.FocusLost:Connect(function() commit(textBox.Text) end)
 
@@ -1271,7 +1280,7 @@ function Library:CreateInput(parent, label, configPath, defaultValue, callback, 
         end)
     else
         -- NoSave tidak ikut Init, jadi callback langsung dijalankan sekali dari nilai awal
-        safeCall(context, callback, resolveInput(initial))
+        fireCallback(context, callback, resolveInput(initial))
     end
 
     return {
@@ -1292,7 +1301,7 @@ function Library:CreateButton(parent, label, callback)
     button.MouseButton1Click:Connect(function()
         if busy then return end
         busy = true
-        task.spawn(safeCall, "button '" .. tostring(label) .. "'", callback)
+        fireCallback("button '" .. tostring(label) .. "'", callback)
         task.delay(0.1, function() busy = false end)
     end)
     return frame
@@ -1712,7 +1721,7 @@ local function createSection(lib, page, tabName, sectionTitle, isOpen)
         return {
             SetValue = function(_, value)
                 toggle.set(value)
-                safeCall("toggle '" .. tostring(title) .. "'", callback, toggle.get())
+                fireCallback("toggle '" .. tostring(title) .. "'", callback, toggle.get())
             end,
             GetValue = function() return toggle.get() end,
         }
